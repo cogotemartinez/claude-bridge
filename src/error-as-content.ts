@@ -18,16 +18,39 @@
  *  the text never matches. */
 const ERROR_AS_CONTENT_RE = /^\s*API Error:\s*\d{3}\b/;
 
-/** How many leading chars we need before we can decide. "API Error: 400"
- *  is 14 chars; 24 gives slack for leading whitespace. Streaming handlers
- *  buffer up to this many chars before forwarding the first delta. */
-export const ERROR_SNIFF_CHARS = 24;
+/** Second shape of the same disease: when the Max/OAuth quota runs out the
+ *  CLI does NOT print an `API Error:` line — it prints a plain sentence:
+ *
+ *      You've hit your limit · resets 8:10am (UTC)
+ *
+ *  and exits zero. The bridge then returned it as a normal completion with
+ *  HTTP 200, so every caller counted a no-op turn as success. Measured on the
+ *  openclaw fleet 2026-07-27: 447 cron runs recorded `status=ok` with this as
+ *  their only output, which also kept `consecutiveErrors` at 0 and therefore
+ *  suppressed every failure alert.
+ *
+ *  Deliberately strict — the `· resets` marker is required — because "you've
+ *  hit your limit" on its own is something an assistant could legitimately
+ *  say. The separator is accepted as `·`, `•` or `-`, and the possessive
+ *  apostrophe as ASCII or typographic, since the CLI has used both. */
+const QUOTA_AS_CONTENT_RE = /^\s*You['’]ve hit your (?:usage )?limit\s*[·•-]\s*resets\b/i;
 
-/** True when the accumulated assistant text IS a CLI-printed API error
- *  (not a real completion). Callers should only trust this when the turn
- *  produced no tool calls. */
+/** Prefix of the quota line used by the streaming gate to keep buffering. */
+const QUOTA_LEAD = "You've hit your ";
+
+/** How many leading chars we need before we can decide. "API Error: 400" is
+ *  14; the quota lead `You've hit your limit · resets` is 30. 34 covers the
+ *  longer one plus slack for leading whitespace. Streaming handlers buffer up
+ *  to this many chars before forwarding the first delta, so this is also the
+ *  worst-case added latency on a normal reply — a few dozen bytes. */
+export const ERROR_SNIFF_CHARS = 34;
+
+/** True when the accumulated assistant text IS a CLI-printed failure rather
+ *  than a real completion — either an `API Error:` line or a quota-exhaustion
+ *  notice. Callers should only trust this when the turn produced no tool
+ *  calls. */
 export function isErrorAsContent(text: string): boolean {
-  return ERROR_AS_CONTENT_RE.test(text);
+  return ERROR_AS_CONTENT_RE.test(text) || QUOTA_AS_CONTENT_RE.test(text);
 }
 
 /** Fixed lead every CLI error line starts with, before the HTTP status. */
@@ -55,5 +78,11 @@ export function couldBeErrorAsContent(text: string): boolean {
     const rest = trimmed.slice(ERROR_LEAD.length);
     if (/^\d{1,3}$/.test(rest)) return true;
   }
+  // Same probe for the quota line. Compared case-insensitively and with the
+  // apostrophe normalized, so a streamed `You’ve hit your …` keeps buffering
+  // instead of leaking its first delta and disabling retry.
+  const probe = trimmed.toLowerCase().replace(/’/g, "'");
+  const lead = QUOTA_LEAD.toLowerCase();
+  if (probe.length > 0 && (lead.startsWith(probe) || probe.startsWith(lead))) return true;
   return isErrorAsContent(text);
 }

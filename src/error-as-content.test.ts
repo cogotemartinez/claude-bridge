@@ -69,3 +69,47 @@ test("couldBeErrorAsContent flushes once it's clearly not an error line", () => 
     true,
   );
 });
+
+// --- Quota-exhaustion notices (added 2026-07-28) ---------------------------
+// The Max/OAuth CLI prints these instead of an `API Error:` line and exits
+// zero, so they used to be returned as a normal completion with HTTP 200.
+// Measured on the openclaw fleet: 447 cron runs recorded status=ok whose only
+// output was one of these, which also kept consecutiveErrors at 0 and
+// suppressed every failure alert.
+
+const REAL_QUOTA = "You've hit your limit · resets 8:10am (UTC)";
+
+test("matches the production quota notice verbatim", () => {
+  assert.equal(isErrorAsContent(REAL_QUOTA), true);
+});
+
+test("matches quota notice variants seen in the run logs", () => {
+  assert.equal(
+    isErrorAsContent("You've hit your limit · resets 11pm (America/Buenos_Aires)"),
+    true,
+  );
+  assert.equal(isErrorAsContent("  You've hit your limit · resets 4am (UTC)"), true);
+  // Typographic apostrophe and the "usage limit" wording.
+  assert.equal(isErrorAsContent("You’ve hit your usage limit · resets 9am (UTC)"), true);
+});
+
+test("does not match an assistant legitimately talking about limits", () => {
+  assert.equal(
+    isErrorAsContent("You've hit your limit of 3 retries, so I stopped there."),
+    false,
+  );
+  assert.equal(
+    isErrorAsContent("Che, ayer el bridge tiró 'You've hit your limit' en los logs"),
+    false,
+  );
+  // Missing the `· resets` marker: not the CLI line.
+  assert.equal(isErrorAsContent("You've hit your limit."), false);
+});
+
+test("streaming gate keeps buffering a partial quota line", () => {
+  assert.equal(couldBeErrorAsContent("You'"), true);
+  assert.equal(couldBeErrorAsContent("You've hit your"), true);
+  assert.equal(couldBeErrorAsContent("You’ve hit your li"), true);
+  // A normal reply that starts differently must not be held back.
+  assert.equal(couldBeErrorAsContent("Hola jefe"), false);
+});
