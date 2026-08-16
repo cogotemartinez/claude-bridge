@@ -113,3 +113,19 @@ test("streaming gate keeps buffering a partial quota line", () => {
   // A normal reply that starts differently must not be held back.
   assert.equal(couldBeErrorAsContent("Hola jefe"), false);
 });
+
+test("matches the 'session limit' wording the CLI uses for the 5h window", () => {
+  // Observed on the openclaw fleet 2026-08-16: the mecánica Slack thread got
+  // this verbatim as an assistant reply, so nothing retried and the session
+  // recorded a no-op turn as success. The qualifier between "your" and "limit"
+  // varies ("", "usage", "session"), so the detector must not enumerate it.
+  assert.equal(
+    isErrorAsContent("You've hit your session limit · resets 4:10am (America/Buenos_Aires)"),
+    true,
+  );
+  assert.equal(isErrorAsContent("You’ve hit your session limit · resets 4:10am"), true);
+  // Still strict: an unknown qualifier is fine, but the `· resets` marker and
+  // the "limit" head noun are both still required.
+  assert.equal(isErrorAsContent("You've hit your weekly limit · resets Monday"), true);
+  assert.equal(isErrorAsContent("You've hit your session limit of 3 tabs, sorry."), false);
+});

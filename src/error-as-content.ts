@@ -32,8 +32,15 @@ const ERROR_AS_CONTENT_RE = /^\s*API Error:\s*\d{3}\b/;
  *  Deliberately strict — the `· resets` marker is required — because "you've
  *  hit your limit" on its own is something an assistant could legitimately
  *  say. The separator is accepted as `·`, `•` or `-`, and the possessive
- *  apostrophe as ASCII or typographic, since the CLI has used both. */
-const QUOTA_AS_CONTENT_RE = /^\s*You['’]ve hit your (?:usage )?limit\s*[·•-]\s*resets\b/i;
+ *  apostrophe as ASCII or typographic, since the CLI has used both.
+ *
+ *  The qualifier before "limit" is matched as one optional generic word rather
+ *  than an enumeration. An earlier version allowed only `usage`, so when the
+ *  CLI started printing `You've hit your session limit · resets 4:10am` that
+ *  line sailed through as a real completion — which is how jarvis answered a
+ *  Slack thread with the quota notice on 2026-08-16. Any new qualifier the CLI
+ *  invents is now covered without another patch. */
+const QUOTA_AS_CONTENT_RE = /^\s*You['’]ve hit your (?:\w+ )?limit\s*[·•-]\s*resets\b/i;
 
 /** Prefix of the quota line used by the streaming gate to keep buffering. */
 const QUOTA_LEAD = "You've hit your ";

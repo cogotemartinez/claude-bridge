@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type { CLIResult } from "./cli-worker.ts";
 import {
   buildCompletionResponse,
+  buildUsagePayload,
   mapFinishReason,
   sanitizeClientError,
 } from "./response-format.ts";
@@ -13,6 +14,8 @@ function result(over: Partial<CLIResult>): CLIResult {
     toolCalls: [],
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
     stopReason: "end_turn",
     sessionId: "s",
     rateLimitStatus: undefined,
@@ -76,4 +79,40 @@ test("buildCompletionResponse: tool calls -> tool_calls finish + serialized args
   const fn = tc.function as Record<string, unknown>;
   assert.equal(fn.name, "search");
   assert.equal(fn.arguments, JSON.stringify({ q: "x" }));
+});
+
+test("buildUsagePayload: cache tokens are folded into prompt_tokens + details", () => {
+  // OpenClaw reads context size as input+output+cacheRead+cacheWrite, deriving
+  // input as prompt_tokens - cached_tokens - cache_write_tokens. Reporting only
+  // the uncached input made a 150k-token prompt look like 2 tokens.
+  const usage = buildUsagePayload(
+    result({ inputTokens: 2, outputTokens: 745, cacheReadTokens: 140_000, cacheCreationTokens: 8_000 }),
+  );
+  assert.deepEqual(usage, {
+    prompt_tokens: 148_002,
+    completion_tokens: 745,
+    total_tokens: 148_747,
+    prompt_tokens_details: { cached_tokens: 140_000, cache_write_tokens: 8_000 },
+  });
+});
+
+test("buildUsagePayload: omits the details block when nothing was cached", () => {
+  assert.deepEqual(buildUsagePayload(result({ inputTokens: 3, outputTokens: 4 })), {
+    prompt_tokens: 3,
+    completion_tokens: 4,
+    total_tokens: 7,
+  });
+});
+
+test("buildCompletionResponse: reports cache tokens in its usage block", () => {
+  const out = buildCompletionResponse(
+    result({ text: "hi", inputTokens: 2, outputTokens: 5, cacheReadTokens: 900 }),
+    "claude-opus-4",
+  );
+  assert.deepEqual(out.usage, {
+    prompt_tokens: 902,
+    completion_tokens: 5,
+    total_tokens: 907,
+    prompt_tokens_details: { cached_tokens: 900, cache_write_tokens: 0 },
+  });
 });

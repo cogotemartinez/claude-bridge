@@ -21,6 +21,7 @@ import { BRIDGE_VERSION } from "./version.js";
 import { validateChatRequest } from "./request-validate.js";
 import {
   buildCompletionResponse,
+  buildUsagePayload,
   mapFinishReason,
   sanitizeClientError,
 } from "./response-format.js";
@@ -392,13 +393,20 @@ async function handlePersistentStreaming(
     });
     sseOpened = true;
   };
-  const emitChunk = (delta: Record<string, unknown>, finish?: string) => {
+  const emitChunk = (
+    delta: Record<string, unknown>,
+    finish?: string,
+    usage?: Record<string, unknown>,
+  ) => {
     writeSSE(res, {
       id: msgId,
       object: "chat.completion.chunk",
       created: ts,
       model: modelId,
       choices: [{ index: 0, delta, finish_reason: finish ?? null }],
+      // Usage rides the terminal chunk instead of a trailing usage-only one so
+      // a client that stops reading at finish_reason still sees it.
+      ...(usage ? { usage } : {}),
     });
   };
 
@@ -462,7 +470,7 @@ async function handlePersistentStreaming(
 
     openSSE();
     const hasToolCalls = result.toolCalls.length > 0;
-    emitChunk({}, mapFinishReason(result.stopReason, hasToolCalls));
+    emitChunk({}, mapFinishReason(result.stopReason, hasToolCalls), buildUsagePayload(result));
     res.write("data: [DONE]\n\n");
     res.end();
   } catch (err) {
@@ -561,13 +569,20 @@ async function handleStreaming(
     sseOpened = true;
   };
 
-  const emitChunk = (delta: Record<string, unknown>, finish?: string) => {
+  const emitChunk = (
+    delta: Record<string, unknown>,
+    finish?: string,
+    usage?: Record<string, unknown>,
+  ) => {
     writeSSE(res, {
       id: msgId,
       object: "chat.completion.chunk",
       created: ts,
       model: modelId,
       choices: [{ index: 0, delta, finish_reason: finish ?? null }],
+      // Usage rides the terminal chunk instead of a trailing usage-only one so
+      // a client that stops reading at finish_reason still sees it.
+      ...(usage ? { usage } : {}),
     });
   };
 
@@ -632,7 +647,7 @@ async function handleStreaming(
 
     openSSE();
     const hasToolCalls = result.toolCalls.length > 0;
-    emitChunk({}, mapFinishReason(result.stopReason, hasToolCalls));
+    emitChunk({}, mapFinishReason(result.stopReason, hasToolCalls), buildUsagePayload(result));
     res.write("data: [DONE]\n\n");
     res.end();
   } catch (err) {

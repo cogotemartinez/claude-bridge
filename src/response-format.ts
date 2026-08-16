@@ -48,6 +48,34 @@ function toOAIToolCall(tc: CLIToolCall): Record<string, unknown> {
   };
 }
 
+/** OpenAI-shape usage block for a finished turn.
+ *
+ *  `prompt_tokens` is the WHOLE prompt — uncached input plus both cache
+ *  counters — because that is what OpenAI-compatible clients read as the
+ *  context size. The split is preserved in `prompt_tokens_details` so a client
+ *  can still recover the uncached input (`prompt_tokens - cached_tokens -
+ *  cache_write_tokens`) and price the turn correctly.
+ *
+ *  This matters more than it looks: the CLI serves nearly every prompt from
+ *  its prefix cache, so reporting only `inputTokens` told callers a 150k-token
+ *  conversation was ~2 tokens. OpenClaw sizes its context from this block, so
+ *  it never saw a session fill up and never compacted one. */
+export function buildUsagePayload(result: CLIResult): Record<string, unknown> {
+  const cacheRead = result.cacheReadTokens || 0;
+  const cacheWrite = result.cacheCreationTokens || 0;
+  const promptTokens = result.inputTokens + cacheRead + cacheWrite;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: result.outputTokens,
+    total_tokens: promptTokens + result.outputTokens,
+    // Omitted entirely when nothing was cached, so a plain turn keeps the
+    // minimal shape older clients expect.
+    ...(cacheRead > 0 || cacheWrite > 0
+      ? { prompt_tokens_details: { cached_tokens: cacheRead, cache_write_tokens: cacheWrite } }
+      : {}),
+  };
+}
+
 export function buildCompletionResponse(
   result: CLIResult,
   modelId: string,
@@ -72,10 +100,6 @@ export function buildCompletionResponse(
         finish_reason: mapFinishReason(result.stopReason, hasToolCalls),
       },
     ],
-    usage: {
-      prompt_tokens: result.inputTokens,
-      completion_tokens: result.outputTokens,
-      total_tokens: result.inputTokens + result.outputTokens,
-    },
+    usage: buildUsagePayload(result),
   };
 }

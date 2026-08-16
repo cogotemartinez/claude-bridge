@@ -137,3 +137,68 @@ test("parseStream: defaults stop_reason to end_turn when none seen", async () =>
   assert.equal(result.stopReason, "end_turn");
   assert.equal(result.isError, false);
 });
+
+test("parseStream: cache token counts are captured, not discarded", async () => {
+  // The Claude CLI reports a cached prompt as input_tokens≈0 plus the real
+  // bulk in cache_read/cache_creation. Dropping those made the bridge report
+  // `prompt_tokens: 2` for a 250KB prompt, so OpenClaw's context accounting
+  // read ~0 and auto-compaction never fired on long sessions.
+  const result = await parseStream(
+    lines([
+      J({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "x" }],
+          usage: {
+            input_tokens: 2,
+            output_tokens: 745,
+            cache_read_input_tokens: 140_000,
+            cache_creation_input_tokens: 8_000,
+          },
+        },
+      }),
+      J({ type: "result", stop_reason: "end_turn" }),
+    ]),
+  );
+  assert.equal(result.inputTokens, 2);
+  assert.equal(result.outputTokens, 745);
+  assert.equal(result.cacheReadTokens, 140_000);
+  assert.equal(result.cacheCreationTokens, 8_000);
+});
+
+test("parseStream: result-event cache usage overrides assistant cache usage", async () => {
+  const result = await parseStream(
+    lines([
+      J({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "x" }],
+          usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 5 },
+        },
+      }),
+      J({
+        type: "result",
+        stop_reason: "end_turn",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 200,
+          cache_read_input_tokens: 300,
+          cache_creation_input_tokens: 400,
+        },
+      }),
+    ]),
+  );
+  assert.equal(result.cacheReadTokens, 300);
+  assert.equal(result.cacheCreationTokens, 400);
+});
+
+test("parseStream: cache token counts default to 0 when the CLI omits them", async () => {
+  const result = await parseStream(
+    lines([
+      J({ type: "assistant", message: { content: [{ type: "text", text: "x" }] } }),
+      J({ type: "result", stop_reason: "end_turn", usage: { input_tokens: 7, output_tokens: 8 } }),
+    ]),
+  );
+  assert.equal(result.cacheReadTokens, 0);
+  assert.equal(result.cacheCreationTokens, 0);
+});

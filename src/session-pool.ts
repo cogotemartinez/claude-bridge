@@ -60,8 +60,11 @@ export interface TurnCheckpoint {
   /** Present when the turn completed (model emitted `result` event). */
   result: {
     stopReason: string;
+    /** Uncached prompt tokens only — see `StreamResult.inputTokens`. */
     inputTokens: number;
     outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
     rateLimitStatus: string | undefined;
     /** Resolved upstream model version (e.g. "claude-opus-4-5-20251201") as
      *  reported in the assistant event's `model` field. May be `undefined`
@@ -257,6 +260,8 @@ class PersistentSession {
             stopReason: "error",
             inputTokens: 0,
             outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
             rateLimitStatus: undefined,
             modelVersion: undefined,
             isError: true,
@@ -341,6 +346,8 @@ class PersistentSession {
     const lines = linesOf(this.proc.stdout);
     let outputTokens = 0;
     let inputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     let rateLimitStatus: string | undefined;
     let modelVersion: string | undefined;
     for await (const line of lines) {
@@ -368,7 +375,12 @@ class PersistentSession {
         const message = evt.message as
           | {
               content?: Array<Record<string, unknown>>;
-              usage?: { input_tokens?: number; output_tokens?: number };
+              usage?: {
+                input_tokens?: number;
+                output_tokens?: number;
+                cache_read_input_tokens?: number;
+                cache_creation_input_tokens?: number;
+              };
               model?: string;
             }
           | undefined;
@@ -401,6 +413,12 @@ class PersistentSession {
         if (usage) {
           if (typeof usage.input_tokens === "number") inputTokens = usage.input_tokens;
           if (typeof usage.output_tokens === "number") outputTokens = usage.output_tokens;
+          // The CLI serves most of the prompt from its prefix cache, so these
+          // two carry the bulk of the context size, not input_tokens.
+          if (typeof usage.cache_read_input_tokens === "number")
+            cacheReadTokens = usage.cache_read_input_tokens;
+          if (typeof usage.cache_creation_input_tokens === "number")
+            cacheCreationTokens = usage.cache_creation_input_tokens;
         }
         continue;
       }
@@ -425,6 +443,8 @@ class PersistentSession {
             stopReason,
             inputTokens,
             outputTokens,
+            cacheReadTokens,
+            cacheCreationTokens,
             rateLimitStatus,
             modelVersion,
             isError,
@@ -435,6 +455,8 @@ class PersistentSession {
         // next user message in this persistent session.
         outputTokens = 0;
         inputTokens = 0;
+        cacheReadTokens = 0;
+        cacheCreationTokens = 0;
         rateLimitStatus = undefined;
         modelVersion = undefined;
       }

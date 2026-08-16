@@ -16,8 +16,15 @@ export interface StreamToolUse {
 export interface StreamResult {
   text: string;
   toolUses: StreamToolUse[];
+  /** Uncached prompt tokens only. On the OAuth/Max CLI path almost the whole
+   *  prompt is served from the cache, so this is routinely ~2 even for a
+   *  150k-token conversation — never treat it as the context size on its own. */
   inputTokens: number;
   outputTokens: number;
+  /** Prompt tokens served from the CLI's prefix cache. */
+  cacheReadTokens: number;
+  /** Prompt tokens written into the prefix cache on this turn. */
+  cacheCreationTokens: number;
   stopReason: string;
   rateLimitStatus: string | undefined;
   /**
@@ -41,11 +48,20 @@ interface AssistantContentBlock {
   input?: Record<string, unknown>;
 }
 
+/** Usage block as the Claude CLI emits it, on both `assistant` and `result`
+ *  events. The cache counters are optional — older CLI builds omit them. */
+interface CLIUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 interface StreamEvent {
   type?: string;
   message?: {
     content?: AssistantContentBlock[];
-    usage?: { input_tokens?: number; output_tokens?: number };
+    usage?: CLIUsage;
     stop_reason?: string | null;
     /** Resolved model version (e.g. "claude-opus-4-5-20251201") — present
      *  on assistant events from the Claude CLI's stream-json output. */
@@ -57,7 +73,7 @@ interface StreamEvent {
   errors?: string[];
   stop_reason?: string;
   result?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: CLIUsage;
 }
 
 export async function* linesOf(
@@ -95,6 +111,19 @@ export async function parseStream(
   const toolUses: StreamToolUse[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  /** Last write wins: the `result` event's totals supersede the running
+   *  per-assistant-event numbers. Each counter is copied independently so a
+   *  usage block that reports only some of them leaves the rest untouched. */
+  const applyUsage = (usage: CLIUsage): void => {
+    if (typeof usage.input_tokens === "number") inputTokens = usage.input_tokens;
+    if (typeof usage.output_tokens === "number") outputTokens = usage.output_tokens;
+    if (typeof usage.cache_read_input_tokens === "number")
+      cacheReadTokens = usage.cache_read_input_tokens;
+    if (typeof usage.cache_creation_input_tokens === "number")
+      cacheCreationTokens = usage.cache_creation_input_tokens;
+  };
   let stopReason = "end_turn";
   let rateLimitStatus: string | undefined;
   let modelVersion: string | undefined;
@@ -138,13 +167,7 @@ export async function parseStream(
       if (!modelVersion && typeof evt.message?.model === "string") {
         modelVersion = evt.message.model;
       }
-      const usage = evt.message?.usage;
-      if (usage) {
-        if (typeof usage.input_tokens === "number")
-          inputTokens = usage.input_tokens;
-        if (typeof usage.output_tokens === "number")
-          outputTokens = usage.output_tokens;
-      }
+      if (evt.message?.usage) applyUsage(evt.message.usage);
       continue;
     }
 
@@ -157,12 +180,7 @@ export async function parseStream(
 
     if (evt.type === "result") {
       if (typeof evt.stop_reason === "string") stopReason = evt.stop_reason;
-      if (evt.usage) {
-        if (typeof evt.usage.input_tokens === "number")
-          inputTokens = evt.usage.input_tokens;
-        if (typeof evt.usage.output_tokens === "number")
-          outputTokens = evt.usage.output_tokens;
-      }
+      if (evt.usage) applyUsage(evt.usage);
       if (evt.is_error === true) {
         errorMessage =
           evt.errors?.[0] ?? (typeof evt.result === "string" ? evt.result : undefined);
@@ -179,6 +197,8 @@ export async function parseStream(
     toolUses,
     inputTokens,
     outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
     stopReason,
     rateLimitStatus,
     modelVersion,

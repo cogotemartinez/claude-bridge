@@ -83,8 +83,12 @@ export interface CLIToolCall {
 export interface CLIResult {
   text: string;
   toolCalls: CLIToolCall[];
+  /** Uncached prompt tokens only — see `StreamResult.inputTokens`. Callers
+   *  sizing a context must add the two cache counters below. */
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
   stopReason: string;
   sessionId: string;
   rateLimitStatus: string | undefined;
@@ -447,6 +451,8 @@ export async function enqueuePersistent(
         toolCalls,
         inputTokens: cp.result?.inputTokens ?? 0,
         outputTokens: cp.result?.outputTokens ?? 0,
+        cacheReadTokens: cp.result?.cacheReadTokens ?? 0,
+        cacheCreationTokens: cp.result?.cacheCreationTokens ?? 0,
         stopReason,
         sessionId: session.sessionId,
         rateLimitStatus: cp.result?.rateLimitStatus,
@@ -909,6 +915,8 @@ async function runCLI(
       toolCalls,
       inputTokens: parsed.inputTokens,
       outputTokens: parsed.outputTokens,
+      cacheReadTokens: parsed.cacheReadTokens,
+      cacheCreationTokens: parsed.cacheCreationTokens,
       stopReason,
       sessionId,
       rateLimitStatus: parsed.rateLimitStatus,

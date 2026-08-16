@@ -28,10 +28,14 @@ before(async () => {
   // Fake `claude`: drain stdin, emit one assistant turn + a result, exit 0.
   fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-e2e-bin-"));
   const fake = path.join(fakeBin, "claude");
+  // Cache counters are part of the fixture on purpose: the CLI puts almost the
+  // whole prompt in cache_read, so a fake that only emits input_tokens cannot
+  // catch the accounting bug that let sessions grow past the context budget.
+  const usage =
+    '{"input_tokens":3,"output_tokens":1,"cache_read_input_tokens":90,"cache_creation_input_tokens":6}';
   const assistant =
-    '{"type":"assistant","message":{"content":[{"type":"text","text":"pong"}],"usage":{"input_tokens":3,"output_tokens":1},"model":"claude-haiku-4-5"}}';
-  const result =
-    '{"type":"result","stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}';
+    `{"type":"assistant","message":{"content":[{"type":"text","text":"pong"}],"usage":${usage},"model":"claude-haiku-4-5"}}`;
+  const result = `{"type":"result","stop_reason":"end_turn","usage":${usage}}`;
   fs.writeFileSync(
     fake,
     `#!/usr/bin/env bash\ncat > /dev/null\nprintf '%s\\n' '${assistant}'\nprintf '%s\\n' '${result}'\nexit 0\n`,
@@ -108,7 +112,9 @@ test("POST /v1/chat/completions (non-streaming) -> completion via the fake CLI",
   assert.equal(j.object, "chat.completion");
   assert.equal(j.choices[0].message.content, "pong");
   assert.equal(j.choices[0].finish_reason, "stop");
-  assert.equal(j.usage.total_tokens, 4);
+  assert.equal(j.usage.prompt_tokens, 99); // 3 uncached + 90 cache_read + 6 cache_creation
+  assert.equal(j.usage.total_tokens, 100);
+  assert.deepEqual(j.usage.prompt_tokens_details, { cached_tokens: 90, cache_write_tokens: 6 });
 });
 
 test("POST with empty messages -> 400", async () => {
@@ -156,4 +162,32 @@ test("streaming -> SSE chunks (role, content, finish, [DONE])", async () => {
   assert.match(text, /"content":"pong"/);
   assert.match(text, /"finish_reason":"stop"/);
   assert.match(text, /data: \[DONE\]/);
+});
+
+test("streaming -> final chunk carries usage so the client can size the context", async () => {
+  // The streaming path used to close with a bare finish chunk and no usage at
+  // all. OpenClaw always requests stream:true, so every turn recorded zero
+  // tokens, auto-compaction never fired, and long sessions ran until the
+  // gateway aborted them as stalled.
+  const r = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-haiku-4", stream: true, messages: [{ role: "user", content: "hi" }] }),
+  });
+  assert.equal(r.status, 200);
+  const chunks = (await r.text())
+    .split("\n")
+    .filter((l) => l.startsWith("data: ") && !l.includes("[DONE]"))
+    .map((l) => JSON.parse(l.slice("data: ".length)) as any);
+  const withUsage = chunks.filter((c) => c.usage);
+  assert.equal(withUsage.length, 1, "exactly one chunk should carry usage");
+  assert.deepEqual(withUsage[0].usage, {
+    prompt_tokens: 99,
+    completion_tokens: 1,
+    total_tokens: 100,
+    prompt_tokens_details: { cached_tokens: 90, cache_write_tokens: 6 },
+  });
+  // Usage rides the terminal chunk, so a client that stops at finish_reason
+  // still sees it.
+  assert.equal(withUsage[0].choices[0].finish_reason, "stop");
 });
