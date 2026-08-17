@@ -86,11 +86,40 @@ export interface PoolConfig {
   nextCheckpointTimeoutMs: number;
 }
 
+/** Read a positive-integer ms value from the environment, else the default. */
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * Idle eviction and lifetime, tuned for how a human actually converses.
+ *
+ * These were 10 min / 60 min. Evicting an idle session is not free: the next
+ * message re-primes the CLI with the WHOLE flattened history (see buildPrompt),
+ * which is paid as cache CREATION — about 12.5x the price of a cache read. So
+ * the eviction window is really "how long a pause costs you the entire thread
+ * again", and at 10 minutes that was every normal gap in a Slack conversation.
+ *
+ * Measured on 2026-08-16: between 62% and 83% of CLI sessions were carrying a
+ * priming blob, and one Slack thread that had grown to ~825k characters was
+ * re-primed 354 times in 8 days — on its own, 59% of the fleet's entire token
+ * consumption. Widening the window is the cheapest lever against that.
+ *
+ * The cost of widening is memory: idle `claude` processes stay alive, bounded
+ * by maxSessions (32). maxLifetimeMs is raised in step so a long-but-active
+ * conversation is not force-respawned mid-afternoon for no reason.
+ *
+ * Both are env-tunable so this can be dialed back without a rebuild if the
+ * process count becomes a problem.
+ */
 const DEFAULT_CONFIG: PoolConfig = {
-  idleEvictMs: 10 * 60_000,
-  maxLifetimeMs: 60 * 60_000,
-  maxSessions: 32,
-  nextCheckpointTimeoutMs: 300_000,
+  idleEvictMs: envMs("CLAUDE_BRIDGE_IDLE_EVICT_MS", 3 * 60 * 60_000),
+  maxLifetimeMs: envMs("CLAUDE_BRIDGE_MAX_LIFETIME_MS", 8 * 60 * 60_000),
+  maxSessions: envMs("CLAUDE_BRIDGE_MAX_SESSIONS", 32),
+  nextCheckpointTimeoutMs: envMs("CLAUDE_BRIDGE_CHECKPOINT_TIMEOUT_MS", 300_000),
 };
 
 // ─── PersistentSession ──────────────────────────────────────────────────────
