@@ -749,6 +749,18 @@ async function runCLI(
     "--tools",
     "",
     "--strict-mcp-config",
+    // `--tools ""` clears the CLI's built-in toolset on purpose: OpenClaw
+    // supplies its own tools over MCP, and letting the CLI keep Bash/Edit/Read
+    // alongside them would be both duplicated and outside OpenClaw's approval
+    // policy. WebSearch is the deliberate exception, re-enabled through the
+    // permission allowlist (which also grants it, so no prompt in --print
+    // mode): it is the ONE capability OpenClaw has no equivalent for, it costs
+    // nothing on top of the Max subscription, and it replaces the Perplexity
+    // key that had been returning 401 insufficient_quota with the whole fleet
+    // silently searching nothing. WebFetch is intentionally NOT here —
+    // OpenClaw already ships its own web-fetch tool.
+    "--allowedTools",
+    "WebSearch",
   ];
   if (effectiveEffort) {
     args.push("--effort", effectiveEffort);
