@@ -130,3 +130,44 @@ export function couldBeErrorAsContent(text: string): boolean {
   }
   return isErrorAsContent(text);
 }
+
+/**
+ * El instante del reset que anuncia la línea de cuota, si lo trae.
+ *
+ * El CLI escribe `You've hit your limit · resets 4pm (America/Buenos_Aires)` o
+ * `resets 8:10am`. Cuando el gateway recibe esto como un 500 genérico lo trata
+ * como error transitorio y quema sus 3 reintentos en 7 minutos — contra una
+ * cuota que vuelve dentro de horas. Medido en la flota: el 21 y el 23-ago cada
+ * episodio convirtió 1 corrida planificada en 4 intentos y después PERDIÓ la
+ * corrida (una de ellas semanal).
+ *
+ * Devuelve segundos hasta el reset (para `Retry-After`), o undefined si la
+ * línea no dice nada parseable. Deliberadamente tolerante: si no se entiende la
+ * hora, mejor no inventar una espera.
+ */
+export function quotaRetryAfterSeconds(text: string, now = new Date()): number | undefined {
+  const m = /\bresets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(text);
+  if (!m) return undefined;
+  let hour = Number(m[1]);
+  const minute = m[2] ? Number(m[2]) : 0;
+  const mer = m[3]?.toLowerCase();
+  if (Number.isNaN(hour) || hour > 23 || minute > 59) return undefined;
+  if (mer === "pm" && hour < 12) hour += 12;
+  if (mer === "am" && hour === 12) hour = 0;
+  const target = new Date(now);
+  target.setHours(hour, minute, 0, 0);
+  // Un reset "ya pasado" es el de mañana: la línea siempre mira hacia adelante.
+  if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+  const secs = Math.round((target.getTime() - now.getTime()) / 1000);
+  // 24h es el techo NATURAL: el "si ya pasó, es el de mañana" de arriba hace
+  // que el resultado nunca pueda ser mayor por construcción. Poner menos
+  // descartaba casos legítimos — con 6h se caía el reset de las 4pm visto
+  // desde la mañana (8h35m), y con 12h el reset nocturno (12h10m). La basura
+  // ya la ataja la validación de hora/minuto.
+  return secs > 0 && secs <= 24 * 3600 ? secs : undefined;
+}
+
+/** True cuando el texto ES la línea de cuota agotada (no un error cualquiera). */
+export function isQuotaExhaustedText(text: string): boolean {
+  return QUOTA_AS_CONTENT_RE.test(text);
+}

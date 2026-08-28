@@ -4,6 +4,8 @@ import {
   couldBeErrorAsContent,
   ERROR_SNIFF_CHARS,
   isErrorAsContent,
+  isQuotaExhaustedText,
+  quotaRetryAfterSeconds,
 } from "./error-as-content.ts";
 
 const REAL_ERROR =
@@ -178,4 +180,36 @@ test("entitlement: control negativo — hablar del tema NO es el error", () => {
     isErrorAsContent("Tu organización deshabilitó el acceso a Claude Code, hay que pedirle al admin"),
     false,
   );
+});
+
+// ── Cuota agotada: 429 con Retry-After, no 500 ──────────────────────────────
+// Devolverla como 500 hacía que el gateway la tratara como error transitorio y
+// quemara sus 3 reintentos en 7 minutos contra una cuota que vuelve en horas
+// (medido: 21 y 23-ago, 4 intentos por episodio y la corrida perdida igual).
+
+test("cuota: reconoce la linea y parsea los tres formatos reales del CLI", () => {
+  const now = new Date("2026-08-28T07:25:00-03:00");
+  assert.equal(isQuotaExhaustedText("You've hit your limit · resets 8:10am"), true);
+  assert.equal(Math.round(quotaRetryAfterSeconds("You've hit your limit · resets 8:10am", now) / 60), 45);
+  assert.equal(
+    Math.round(quotaRetryAfterSeconds("You've hit your session limit · resets 4pm (America/Buenos_Aires)", now) / 60),
+    515,
+  );
+  assert.equal(Math.round(quotaRetryAfterSeconds("You've hit your limit · resets 6:10pm", now) / 60), 645);
+});
+
+test("cuota: un error cualquiera NO se confunde con cuota", () => {
+  assert.equal(isQuotaExhaustedText("API Error: 500 upstream boom"), false);
+  assert.equal(quotaRetryAfterSeconds("API Error: 500 upstream boom"), undefined);
+});
+
+test("cuota: sin hora parseable no se inventa una espera", () => {
+  assert.equal(quotaRetryAfterSeconds("You've hit your limit · resets soon"), undefined);
+  assert.equal(quotaRetryAfterSeconds("resets 99:99am"), undefined);
+});
+
+test("cuota: un reset ya pasado es el de mañana, no una espera negativa", () => {
+  const now = new Date("2026-08-28T20:00:00-03:00");
+  const s = quotaRetryAfterSeconds("You've hit your limit · resets 8:10am", now);
+  assert.ok(s > 0 && s < 13 * 3600, `esperaba una espera positiva razonable, dio ${s}`);
 });

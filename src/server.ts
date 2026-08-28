@@ -3,6 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { isQuotaExhaustedText, quotaRetryAfterSeconds } from "./error-as-content.js";
 import { listModels, resolveModel } from "./models.js";
 import {
   drainAndShutdown,
@@ -364,9 +365,19 @@ async function handlePersistentNonStreaming(
     log("error", "Path D request failed", { model: modelId, duration, error: message });
     if (!res.headersSent) {
       const isTimeout = message.includes("timeout");
-      sendJson(res, isTimeout ? 504 : 500, {
-        error: { message: sanitizeClientError(message), type: "api_error", code: null },
-      });
+      const mapped = quotaAwareErrorResponse(message, isTimeout);
+      sendJson(
+        res,
+        mapped.status,
+        {
+          error: {
+            message: sanitizeClientError(message),
+            type: mapped.status === 429 ? "rate_limit_error" : "api_error",
+            code: null,
+          },
+        },
+        mapped.headers,
+      );
     }
   }
 }
@@ -478,9 +489,19 @@ async function handlePersistentStreaming(
     log("error", "Path D stream failed", { model: modelId, error: message, streamed: sseOpened });
     if (!sseOpened) {
       const isTimeout = message.includes("timeout");
-      sendJson(res, isTimeout ? 504 : 500, {
-        error: { message: sanitizeClientError(message), type: "api_error", code: null },
-      });
+      const mapped = quotaAwareErrorResponse(message, isTimeout);
+      sendJson(
+        res,
+        mapped.status,
+        {
+          error: {
+            message: sanitizeClientError(message),
+            type: mapped.status === 429 ? "rate_limit_error" : "api_error",
+            code: null,
+          },
+        },
+        mapped.headers,
+      );
       return;
     }
     try {
@@ -527,9 +548,19 @@ async function handleNonStreaming(
     log("error", "Request failed", { model: modelId, duration, error: message });
     if (!res.headersSent) {
       const isTimeout = message.includes("timeout");
-      sendJson(res, isTimeout ? 504 : 500, {
-        error: { message: sanitizeClientError(message), type: "api_error", code: null },
-      });
+      const mapped = quotaAwareErrorResponse(message, isTimeout);
+      sendJson(
+        res,
+        mapped.status,
+        {
+          error: {
+            message: sanitizeClientError(message),
+            type: mapped.status === 429 ? "rate_limit_error" : "api_error",
+            code: null,
+          },
+        },
+        mapped.headers,
+      );
     }
   }
 }
@@ -663,9 +694,19 @@ async function handleStreaming(
     if (!sseOpened) {
       // Nothing committed — emit a structured JSON error like non-streaming.
       const isTimeout = message.includes("timeout");
-      sendJson(res, isTimeout ? 504 : 500, {
-        error: { message: sanitizeClientError(message), type: "api_error", code: null },
-      });
+      const mapped = quotaAwareErrorResponse(message, isTimeout);
+      sendJson(
+        res,
+        mapped.status,
+        {
+          error: {
+            message: sanitizeClientError(message),
+            type: mapped.status === 429 ? "rate_limit_error" : "api_error",
+            code: null,
+          },
+        },
+        mapped.headers,
+      );
       return;
     }
     // SSE already opened: close cleanly with an error-flavored chunk so the
@@ -730,7 +771,36 @@ function readBody(
   });
 }
 
-function sendJson(res: ServerResponse, status: number, data: unknown): void {
+
+/**
+ * Una cuota agotada NO es un error de servidor.
+ *
+ * Devolverla como 500 hacía que el gateway la clasificara `server_error` =
+ * transitorio y quemara sus 3 reintentos en 7 minutos (30s/60s/5min) contra una
+ * cuota que vuelve dentro de HORAS — y después perdía la corrida. Medido en la
+ * flota el 21 y el 23-ago: cada episodio convirtió 1 corrida planificada en 4
+ * intentos, incluida una semanal que se perdió del todo.
+ *
+ * 429 + `Retry-After` es la respuesta correcta y además legible: cualquier
+ * cliente que respete el header espera lo que hay que esperar en vez de
+ * martillar.
+ */
+function quotaAwareErrorResponse(
+  message: string,
+  isTimeout: boolean,
+): { status: number; headers?: Record<string, string> } {
+  if (isTimeout) return { status: 504 };
+  if (!isQuotaExhaustedText(message)) return { status: 500 };
+  const secs = quotaRetryAfterSeconds(message);
+  return { status: 429, headers: secs ? { "Retry-After": String(secs) } : undefined };
+}
+
+function sendJson(
+  res: ServerResponse,
+  status: number,
+  data: unknown,
+  extraHeaders?: Record<string, string>,
+): void {
   // The client may have disconnected (socket destroyed on req close / abort);
   // writing headers to a destroyed response throws. Guard once here so every
   // error/response path is safe instead of repeating the check at each site.
@@ -739,6 +809,7 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(body),
+    ...(extraHeaders ?? {}),
   });
   res.end(body);
 }
