@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert";
 import {
   couldBeErrorAsContent,
+  ERROR_SNIFF_CHARS,
   isErrorAsContent,
 } from "./error-as-content.ts";
 
@@ -128,4 +129,53 @@ test("matches the 'session limit' wording the CLI uses for the 5h window", () =>
   // the "limit" head noun are both still required.
   assert.equal(isErrorAsContent("You've hit your weekly limit · resets Monday"), true);
   assert.equal(isErrorAsContent("You've hit your session limit of 3 tabs, sorry."), false);
+});
+
+// ── Tercer sabor: fallas de entitlement (fleet 2026-08-22) ──────────────────
+// Texto REAL sacado de task_runs: cuatro corridas de cron lo registraron como
+// `succeeded`, y tony-briefing lo ENTREGÓ al canal de finanzas como el briefing
+// del día. Los dos patrones previos, verificados contra este texto, dan false.
+const REAL_ENTITLEMENT =
+  "Your organization has disabled Claude subscription access for Claude Code · " +
+  "Use an Anthropic API key instead, or ask your admin to enable access";
+
+test("entitlement: el texto real de la flota se detecta", () => {
+  assert.equal(isErrorAsContent(REAL_ENTITLEMENT), true);
+});
+
+test("entitlement: la fraseología negativa también", () => {
+  assert.equal(
+    isErrorAsContent("Your organization has not enabled Claude Code for this workspace"),
+    true,
+  );
+});
+
+test("entitlement: streameado, la compuerta sigue bufferando en vez de filtrar", () => {
+  // Cada prefijo tiene que mantener el buffer: si alguno devuelve false, ese
+  // delta se le entrega al llamador como respuesta real y se pierde el retry.
+  for (const n of [1, 5, 12, 22, 30, 39]) {
+    assert.equal(
+      couldBeErrorAsContent(REAL_ENTITLEMENT.slice(0, n)),
+      true,
+      `prefijo de ${n} chars filtró`,
+    );
+  }
+});
+
+test("entitlement: el peor caso entra en ERROR_SNIFF_CHARS", () => {
+  // "Your organization has not enabled " son 34 chars: con el valor viejo se
+  // decidía en el último byte, sin margen.
+  assert.ok(ERROR_SNIFF_CHARS >= "Your organization has not enabled ".length + 5);
+});
+
+test("entitlement: control negativo — hablar del tema NO es el error", () => {
+  // Una respuesta legítima que MENCIONA el permiso no puede caer.
+  assert.equal(
+    isErrorAsContent("Revisé el acceso: your organization has disabled nothing, está todo bien"),
+    false,
+  );
+  assert.equal(
+    isErrorAsContent("Tu organización deshabilitó el acceso a Claude Code, hay que pedirle al admin"),
+    false,
+  );
 });

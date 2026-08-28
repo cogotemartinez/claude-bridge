@@ -45,19 +45,48 @@ const QUOTA_AS_CONTENT_RE = /^\s*You['’]ve hit your (?:\w+ )?limit\s*[·•-]\
 /** Prefix of the quota line used by the streaming gate to keep buffering. */
 const QUOTA_LEAD = "You've hit your ";
 
+/** Third shape of the same disease: an entitlement/authorization failure. The
+ *  CLI prints it as plain prose — no `API Error:` line, no quota marker — and
+ *  exits zero, so the bridge returned it as a normal completion:
+ *
+ *      Your organization has disabled Claude subscription access for Claude
+ *      Code · Use an Anthropic API key instead, or ask your admin to enable
+ *      access
+ *
+ *  Measured on the openclaw fleet 2026-08-22: four cron runs recorded
+ *  `status=succeeded` with exactly this as their only output, and tony-briefing
+ *  DELIVERED it to the finance channel as that day's briefing. The two existing
+ *  patterns were verified against the real text and both return false.
+ *
+ *  Strict on purpose: the line has to OPEN with the entitlement clause and name
+ *  Claude, so an assistant legitimately discussing org permissions ("your
+ *  organization has disabled it, so…" mid-answer) is not caught. `not enabled`
+ *  is included because it is the same notice in its negative phrasing. */
+const ENTITLEMENT_AS_CONTENT_RE =
+  /^\s*Your organization has (?:disabled|not enabled) [^\n]*\bClaude\b/i;
+
+/** Prefix of the entitlement line, for the streaming gate. */
+const ENTITLEMENT_LEAD = "Your organization has ";
+
 /** How many leading chars we need before we can decide. "API Error: 400" is
- *  14; the quota lead `You've hit your limit · resets` is 30. 34 covers the
- *  longer one plus slack for leading whitespace. Streaming handlers buffer up
+ *  14; the quota lead `You've hit your limit · resets` is 30; the entitlement
+ *  one, `Your organization has not enabled `, is 34 — exactly the old value,
+ *  o sea que se decidía en el último byte disponible, sin margen. 40 deja
+ *  espacio para un calificador más sin volver a tocar esto. Streaming handlers buffer up
  *  to this many chars before forwarding the first delta, so this is also the
  *  worst-case added latency on a normal reply — a few dozen bytes. */
-export const ERROR_SNIFF_CHARS = 34;
+export const ERROR_SNIFF_CHARS = 40;
 
 /** True when the accumulated assistant text IS a CLI-printed failure rather
  *  than a real completion — either an `API Error:` line or a quota-exhaustion
  *  notice. Callers should only trust this when the turn produced no tool
  *  calls. */
 export function isErrorAsContent(text: string): boolean {
-  return ERROR_AS_CONTENT_RE.test(text) || QUOTA_AS_CONTENT_RE.test(text);
+  return (
+    ERROR_AS_CONTENT_RE.test(text) ||
+    QUOTA_AS_CONTENT_RE.test(text) ||
+    ENTITLEMENT_AS_CONTENT_RE.test(text)
+  );
 }
 
 /** Fixed lead every CLI error line starts with, before the HTTP status. */
@@ -91,5 +120,13 @@ export function couldBeErrorAsContent(text: string): boolean {
   const probe = trimmed.toLowerCase().replace(/’/g, "'");
   const lead = QUOTA_LEAD.toLowerCase();
   if (probe.length > 0 && (lead.startsWith(probe) || probe.startsWith(lead))) return true;
+  // Y el mismo probe para la línea de entitlement: sin esto un error de este
+  // tipo que llega STREAMEADO filtra su primer delta como si fuera respuesta
+  // real y deshabilita el retry — el patrón nuevo solo serviría para el caso
+  // no-streaming.
+  const entitlementLead = ENTITLEMENT_LEAD.toLowerCase();
+  if (probe.length > 0 && (entitlementLead.startsWith(probe) || probe.startsWith(entitlementLead))) {
+    return true;
+  }
   return isErrorAsContent(text);
 }
