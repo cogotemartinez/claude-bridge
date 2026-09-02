@@ -88,12 +88,19 @@ test("GET /health -> ok + version", async () => {
   assert.equal(typeof j.version, "string");
 });
 
-test("GET /v1/models -> the three bridge ids", async () => {
+test("GET /v1/models -> the bridge ids", async () => {
   const r = await fetch(`${base}/v1/models`);
   assert.equal(r.status, 200);
   const j: any = await r.json();
   const ids = j.data.map((m: any) => m.id).sort();
-  assert.deepEqual(ids, ["claude-haiku-4", "claude-opus-4", "claude-sonnet-4"]);
+  // 2026-09-02: los ids dicen el modelo que el CLI corre de verdad (la familia 5).
+  // Los ids viejos siguen resolviendo por alias — eso lo cubre models.test.ts.
+  assert.deepEqual(ids, [
+    "claude-fable-5-1",
+    "claude-haiku-4-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+  ]);
 });
 
 test("unknown route -> 404", async () => {
