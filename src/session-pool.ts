@@ -36,6 +36,7 @@ import { formatUserMessageLine } from "./user-message-format.js";
 import type { ContentBlock } from "./translate.js";
 import type { Effort } from "./cli-worker.js";
 import { decideSessionAction } from "./session-pool-decision.js";
+import { pushPluginIsolationArgs } from "./plugin-isolation.js";
 
 export interface SessionSpec {
   model: string;
@@ -623,6 +624,8 @@ export class PersistentSessionPool {
     if (spec.systemPrompt) args.push("--system-prompt", spec.systemPrompt);
     if (allowedTools) args.push("--allowedTools", allowedTools);
     if (spec.effort) args.push("--effort", spec.effort);
+    // Operator plugins stay out of the persistent CLI too (plugin-isolation.ts).
+    pushPluginIsolationArgs(args);
 
     const proc = spawn("claude", args, {
       env: { ...process.env },

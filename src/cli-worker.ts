@@ -20,6 +20,7 @@ import {
   type StreamEventHandlers,
   type StreamToolUse,
 } from "./stream-parser.js";
+import { pushPluginIsolationArgs } from "./plugin-isolation.js";
 
 const MCP_SERVER_NAME = "openclaw";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -771,6 +772,10 @@ async function runCLI(
   } else {
     args.push("--resume", sessionId);
   }
+  // Keep the operator's Claude Code plugins (and their SessionStart hooks) out
+  // of bridge workers — see plugin-isolation.ts. Every --resume is a new
+  // process, so this matters on every tool-call step, not just the first.
+  pushPluginIsolationArgs(args);
 
   const promptToSend = isNew ? request.prompt : request.lastMessage;
 
