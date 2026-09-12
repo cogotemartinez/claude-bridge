@@ -237,6 +237,18 @@ async function handleChatCompletions(
   }
   const oaiReq = validated.req;
 
+  // Session identity. OpenClaw never sets the OpenAI `user` field, but it does send
+  // `prompt_cache_key` (a stable per-session id) once the model declares
+  // compat.supportsPromptCacheKey. Without this the bridge spawned a brand new CLI
+  // session on every single turn — measured 2026-09-12: 231 of 231 spawns isNew:true,
+  // and 8.4M cacheWrite tokens against 1.9M cacheRead over five days, which is what
+  // exhausted the weekly Max quota on 2026-09-08.
+  const sessionKey =
+    oaiReq.user ??
+    (typeof (oaiReq as { prompt_cache_key?: unknown }).prompt_cache_key === "string"
+      ? (oaiReq as { prompt_cache_key?: string }).prompt_cache_key
+      : undefined);
+
   const model = resolveModel(oaiReq.model ?? "claude-sonnet-4");
   const built = buildPrompt(oaiReq);
   const tools = toolsFromRequest(oaiReq);
@@ -289,7 +301,7 @@ async function handleChatCompletions(
     model: model.cliAlias,
     systemPrompt: built.systemPrompt,
     tools,
-    sessionKey: oaiReq.user,
+    sessionKey,
     effort,
     ultracode,
   };
@@ -309,9 +321,9 @@ async function handleChatCompletions(
   //     handle yet, e.g. last message is assistant)
   // Falls through to the v3.3 spawn-fresh path otherwise.
   const pathD = isPathDEnabled() ? extractForPathD(oaiReq) : null;
-  if (pathD && oaiReq.user) {
+  if (pathD && sessionKey) {
     const persistentReq = {
-      sessionKey: oaiReq.user,
+      sessionKey,
       model: model.cliAlias,
       systemPrompt: pathD.systemPrompt,
       tools,
