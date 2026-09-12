@@ -10,6 +10,7 @@ import {
   couldBeErrorAsContent,
   ERROR_SNIFF_CHARS,
   isErrorAsContent,
+  CLI_ERROR_AS_CONTENT_PREFIX,
 } from "./error-as-content.js";
 import type { BridgeMcpHttpServer, McpTool } from "./mcp-http.js";
 import type { PersistentSessionPool } from "./session-pool.js";
@@ -429,7 +430,7 @@ export async function enqueuePersistent(
       // now contains the failed turn and is not safely reusable.
       if (toolCalls.length === 0 && isErrorAsContent(cp.text)) {
         sessionPool.teardown(request.sessionKey);
-        throw new Error(`CLI error-as-content: ${cp.text.slice(0, 300)}`);
+        throw new Error(`${CLI_ERROR_AS_CONTENT_PREFIX}${cp.text.slice(0, 300)}`);
       }
 
       metrics.successes++;
@@ -893,7 +894,7 @@ async function runCLI(
     // was forwarded to the caller, so a retry emits a clean fresh turn.
     if (toolCalls.length === 0 && isErrorAsContent(parsed.text)) {
       if (request.sessionKey) sessions.delete(request.sessionKey);
-      throw new Error(`CLI error-as-content: ${parsed.text.slice(0, 300)}`);
+      throw new Error(`${CLI_ERROR_AS_CONTENT_PREFIX}${parsed.text.slice(0, 300)}`);
     }
 
     if (exitCode !== 0 && toolCalls.length === 0 && !parsed.text) {

@@ -145,16 +145,41 @@ export function couldBeErrorAsContent(text: string): boolean {
  * línea no dice nada parseable. Deliberadamente tolerante: si no se entiende la
  * hora, mejor no inventar una espera.
  */
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
 export function quotaRetryAfterSeconds(text: string, now = new Date()): number | undefined {
-  const m = /\bresets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(text);
+  // El límite SEMANAL nombra el día: `resets Sep 11 at 11am`. Medido en los
+  // logs del 08 al 11-09-2026: de 204 episodios de cuota, 156 (el 76%) traen
+  // esa forma con fecha. La versión anterior exigía un dígito pegado a
+  // "resets", así que con "Sep" no matcheaba y devolvía undefined — o sea que
+  // justo el caso que dura DÍAS era el único sin `Retry-After`. Y leerle solo
+  // el "11am" sería peor que no leer nada: daría "mañana a las 11", una espera
+  // falsa contra una pared de tres días.
+  const m = /\bresets\s+(?:([a-z]{3,9})\s+(\d{1,2})\s+at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(text);
   if (!m) return undefined;
-  let hour = Number(m[1]);
-  const minute = m[2] ? Number(m[2]) : 0;
-  const mer = m[3]?.toLowerCase();
+  const monthWord = m[1]?.toLowerCase();
+  const monthDay = m[2] ? Number(m[2]) : undefined;
+  let hour = Number(m[3]);
+  const minute = m[4] ? Number(m[4]) : 0;
+  const mer = m[5]?.toLowerCase();
   if (Number.isNaN(hour) || hour > 23 || minute > 59) return undefined;
   if (mer === "pm" && hour < 12) hour += 12;
   if (mer === "am" && hour === 12) hour = 0;
   const target = new Date(now);
+  if (monthWord !== undefined) {
+    // Un nombre que no es mes (`resets Monday at 11am`) no dice QUÉ día es:
+    // preferimos no devolver nada antes que inventar una fecha.
+    const monthIdx = MONTHS.indexOf(monthWord.slice(0, 3));
+    if (monthIdx < 0 || monthDay === undefined || monthDay < 1 || monthDay > 31) return undefined;
+    target.setMonth(monthIdx, monthDay);
+    target.setHours(hour, minute, 0, 0);
+    // Un mes ya pasado es el del año que viene (diciembre visto en enero).
+    if (target.getTime() <= now.getTime()) target.setFullYear(target.getFullYear() + 1);
+    const secs = Math.round((target.getTime() - now.getTime()) / 1000);
+    // Con fecha explícita el techo es de una semana larga: es un límite
+    // semanal y la espera real puede ser de días, no de horas.
+    return secs > 0 && secs <= 8 * 24 * 3600 ? secs : undefined;
+  }
   target.setHours(hour, minute, 0, 0);
   // Un reset "ya pasado" es el de mañana: la línea siempre mira hacia adelante.
   if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
@@ -165,6 +190,48 @@ export function quotaRetryAfterSeconds(text: string, now = new Date()): number |
   // desde la mañana (8h35m), y con 12h el reset nocturno (12h10m). La basura
   // ya la ataja la validación de hora/minuto.
   return secs > 0 && secs <= 24 * 3600 ? secs : undefined;
+}
+
+/** Prefijo que el worker le antepone al texto del CLI cuando convierte una
+ *  línea error-as-content en un Error lanzado.
+ *
+ *  Vive acá, y no suelto en cli-worker, porque el que ENVUELVE y el que
+ *  CLASIFICA tienen que estar de acuerdo en una sola forma de escribirlo. No lo
+ *  estaban, y por eso el mapeo a 429 de más abajo nació muerto: el servidor le
+ *  aplicaba al mensaje YA ENVUELTO una regex anclada a `^`, que con el prefijo
+ *  delante no puede matchear nunca. Medido el 12-09-2026: toda cuota agotada
+ *  contestó 500, o sea que el gateway siguió tratando como error transitorio
+ *  una pared que se levanta dentro de HORAS — que es exactamente el daño que
+ *  este arreglo decía haber resuelto el 21-ago. Las pruebas no lo vieron porque
+ *  le pasaban a las funciones el texto CRUDO, que es justo lo único que el
+ *  servidor no tiene en la mano. */
+export const CLI_ERROR_AS_CONTENT_PREFIX = "CLI error-as-content: ";
+
+/** El texto del CLI que hay detrás del mensaje de un Error lanzado. Devuelve
+ *  `message` tal cual cuando no viene envuelto, así sirve para cualquier
+ *  mensaje sin preguntar primero de dónde salió. */
+export function unwrapCliErrorText(message: string): string {
+  return message.startsWith(CLI_ERROR_AS_CONTENT_PREFIX)
+    ? message.slice(CLI_ERROR_AS_CONTENT_PREFIX.length)
+    : message;
+}
+
+/** Status HTTP (y `Retry-After`) para el mensaje de un Error del worker.
+ *
+ *  Es el camino REAL: recibe lo mismo que recibe el servidor, un
+ *  `err.message` posiblemente envuelto, y desenvuelve antes de clasificar.
+ *  Los detectores de arriba están anclados al comienzo de la línea del CLI y
+ *  solo funcionan sobre el texto crudo. */
+export function quotaAwareErrorStatus(
+  message: string,
+  isTimeout: boolean,
+  now = new Date(),
+): { status: number; headers?: Record<string, string> } {
+  if (isTimeout) return { status: 504 };
+  const cliText = unwrapCliErrorText(message);
+  if (!isQuotaExhaustedText(cliText)) return { status: 500 };
+  const secs = quotaRetryAfterSeconds(cliText, now);
+  return { status: 429, headers: secs ? { "Retry-After": String(secs) } : undefined };
 }
 
 /** True cuando el texto ES la línea de cuota agotada (no un error cualquiera). */

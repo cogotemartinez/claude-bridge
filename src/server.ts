@@ -3,7 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isQuotaExhaustedText, quotaRetryAfterSeconds } from "./error-as-content.js";
+import { quotaAwareErrorStatus } from "./error-as-content.js";
 import { listModels, resolveModel } from "./models.js";
 import {
   drainAndShutdown,
@@ -801,10 +801,9 @@ function quotaAwareErrorResponse(
   message: string,
   isTimeout: boolean,
 ): { status: number; headers?: Record<string, string> } {
-  if (isTimeout) return { status: 504 };
-  if (!isQuotaExhaustedText(message)) return { status: 500 };
-  const secs = quotaRetryAfterSeconds(message);
-  return { status: 429, headers: secs ? { "Retry-After": String(secs) } : undefined };
+  // El mensaje llega ENVUELTO por el worker; desenvolver y clasificar es una
+  // sola cosa y vive en el módulo puro, que es el que conoce el formato.
+  return quotaAwareErrorStatus(message, isTimeout);
 }
 
 function sendJson(
