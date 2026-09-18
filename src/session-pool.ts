@@ -31,7 +31,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { BridgeMcpHttpServer, CapturedToolUse, McpTool } from "./mcp-http.js";
-import { linesOf, parseStream, type StreamEventHandlers } from "./stream-parser.js";
+import {
+  linesOf,
+  parseStream,
+  rateLimitFromInfo,
+  type StreamEventHandlers,
+} from "./stream-parser.js";
+import type { RateLimitReading } from "./rate-limit-state.js";
 import { formatUserMessageLine } from "./user-message-format.js";
 import type { ContentBlock } from "./translate.js";
 import type { Effort } from "./cli-worker.js";
@@ -66,7 +72,7 @@ export interface TurnCheckpoint {
     outputTokens: number;
     cacheReadTokens: number;
     cacheCreationTokens: number;
-    rateLimitStatus: string | undefined;
+    rateLimit: RateLimitReading | undefined;
     /** Resolved upstream model version (e.g. "claude-opus-4-5-20251201") as
      *  reported in the assistant event's `model` field. May be `undefined`
      *  if the turn ended before an assistant event arrived. */
@@ -292,7 +298,7 @@ class PersistentSession {
             outputTokens: 0,
             cacheReadTokens: 0,
             cacheCreationTokens: 0,
-            rateLimitStatus: undefined,
+            rateLimit: undefined,
             modelVersion: undefined,
             isError: true,
             errorMessage: "CLI stream closed unexpectedly",
@@ -378,7 +384,7 @@ class PersistentSession {
     let inputTokens = 0;
     let cacheReadTokens = 0;
     let cacheCreationTokens = 0;
-    let rateLimitStatus: string | undefined;
+    let rateLimit: RateLimitReading | undefined;
     let modelVersion: string | undefined;
     for await (const line of lines) {
       if (!line.trim()) continue;
@@ -390,8 +396,7 @@ class PersistentSession {
       }
       const type = evt.type;
       if (type === "rate_limit_event") {
-        const info = evt.rate_limit_info as { status?: string } | undefined;
-        rateLimitStatus = info?.status;
+        rateLimit = rateLimitFromInfo(evt.rate_limit_info) ?? rateLimit;
         continue;
       }
       // Note: unlike the v3.3 stream-parser, Path D does NOT gate assistant
@@ -475,7 +480,7 @@ class PersistentSession {
             outputTokens,
             cacheReadTokens,
             cacheCreationTokens,
-            rateLimitStatus,
+            rateLimit,
             modelVersion,
             isError,
             errorMessage,
@@ -487,7 +492,7 @@ class PersistentSession {
         inputTokens = 0;
         cacheReadTokens = 0;
         cacheCreationTokens = 0;
-        rateLimitStatus = undefined;
+        rateLimit = undefined;
         modelVersion = undefined;
       }
     }

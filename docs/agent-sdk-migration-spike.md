@@ -49,7 +49,7 @@ Concrete, per-module, grounded in the scoping:
 
 **(4) The architectural impedance mismatch.** The bridge is a proxy where the *external* caller owns the tool loop; the SDK assumes *in-process synchronous* tool execution. `createSdkMcpServer`'s `tool()` handler is expected to run the tool and return content — it does **not** natively "park a `tool_use`, end the HTTP turn, resolve later." We must force this with either `canUseTool` deny-as-handoff (record the `tool_use`, return `{behavior:"deny", message}`, surface it over HTTP, resume + inject `tool_result` next turn) or `maxTurns:1` + parse `tool_use` from messages. Neither is the SDK's happy path. **This needs a PoC before any commitment** — it is the thing most likely to be quietly impossible.
 
-**(5) Usage/rate-limit fidelity.** `/metrics`, `recordRateLimitStatus`, and the UI quota warning depend on `rate_limit_event` and resolved `message.model` from stream-json. Resolved model is confirmed via `msg.message.model`; **rate-limit status exposure on `SDKMessage` is uncertain.** Spike to confirm, or the quota warning goes dark.
+**(5) Usage/rate-limit fidelity.** `/metrics`, `recordRateLimit`, and the UI quota warning depend on `rate_limit_event` and resolved `message.model` from stream-json. Resolved model is confirmed via `msg.message.model`; **rate-limit status exposure on `SDKMessage` is uncertain.** Spike to confirm, or the quota warning goes dark.
 
 **(6) ToS posture.** Unchanged for our internal use (same OAuth-Max binary), but the SDK overview's explicit "no claude.ai login for products" note means we must never repackage this SDK engine as a distributable. Documentation/guardrail, not a code change.
 

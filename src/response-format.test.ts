@@ -18,7 +18,7 @@ function result(over: Partial<CLIResult>): CLIResult {
     cacheCreationTokens: 0,
     stopReason: "end_turn",
     sessionId: "s",
-    rateLimitStatus: undefined,
+    rateLimit: undefined,
     modelVersion: undefined,
     ...over,
   };

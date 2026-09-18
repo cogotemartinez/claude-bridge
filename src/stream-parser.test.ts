@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   parseStream,
+  rateLimitFromInfo,
   type StreamToolUse,
 } from "./stream-parser.ts";
 
@@ -110,7 +111,65 @@ test("parseStream: rate_limit_event status is captured", async () => {
       J({ type: "result", stop_reason: "end_turn" }),
     ]),
   );
-  assert.equal(result.rateLimitStatus, "approaching");
+  assert.equal(result.rateLimit?.status, "approaching");
+});
+
+// The shape the installed CLI (2.1.257) really emits. `resetsAt` is epoch
+// SECONDS; with the quota gone, status is "rejected" and the window is named.
+const REJECTED_EVENT = {
+  type: "rate_limit_event",
+  rate_limit_info: {
+    status: "rejected",
+    resetsAt: 1789412400, // 2026-09-14T19:00:00Z
+    rateLimitType: "seven_day",
+    utilization: 1,
+    isUsingOverage: false,
+  },
+  uuid: "u-1",
+  session_id: "s-1",
+};
+
+test("parseStream: rate_limit_event keeps the reset, in ms, and the window type", async () => {
+  const result = await parseStream(
+    lines([
+      J(REJECTED_EVENT),
+      J({ type: "assistant", message: { content: [{ type: "text", text: "ok" }] } }),
+      J({ type: "result", stop_reason: "end_turn" }),
+    ]),
+  );
+  assert.deepEqual(result.rateLimit, {
+    status: "rejected",
+    resetsAtMs: 1789412400000,
+    rateLimitType: "seven_day",
+  });
+});
+
+test("parseStream: a malformed later rate_limit_event does not erase the good one", async () => {
+  const result = await parseStream(
+    lines([
+      J(REJECTED_EVENT),
+      J({ type: "rate_limit_event", rate_limit_info: { resetsAt: 1 } }),
+      J({ type: "result", stop_reason: "end_turn" }),
+    ]),
+  );
+  assert.equal(result.rateLimit?.status, "rejected");
+  assert.equal(result.rateLimit?.resetsAtMs, 1789412400000);
+});
+
+test("rateLimitFromInfo: an absent, null or non-numeric resetsAt yields no reset time", () => {
+  // null is not hypothetical: the CLI's metadata mirror sends `resetsAt ?? null`.
+  for (const resetsAt of [undefined, null, "1789412400", {}, true]) {
+    const r = rateLimitFromInfo({ status: "allowed", resetsAt, rateLimitType: null });
+    assert.deepEqual(r, { status: "allowed" }, `resetsAt=${JSON.stringify(resetsAt)}`);
+    assert.equal(r !== undefined && "resetsAtMs" in r, false);
+  }
+});
+
+test("rateLimitFromInfo: no status means no reading", () => {
+  assert.equal(rateLimitFromInfo(undefined), undefined);
+  assert.equal(rateLimitFromInfo(null), undefined);
+  assert.equal(rateLimitFromInfo({ resetsAt: 1789412400 }), undefined);
+  assert.equal(rateLimitFromInfo({ status: "" }), undefined);
 });
 
 test("parseStream: blank and malformed lines are skipped", async () => {

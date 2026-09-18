@@ -7,6 +7,8 @@
  * single-shot: the bridge hands tool_use back to the caller to execute.
  */
 
+import type { RateLimitReading } from "./rate-limit-state.js";
+
 export interface StreamToolUse {
   id: string;
   name: string;
@@ -26,7 +28,8 @@ export interface StreamResult {
   /** Prompt tokens written into the prefix cache on this turn. */
   cacheCreationTokens: number;
   stopReason: string;
-  rateLimitStatus: string | undefined;
+  /** The last `rate_limit_event` of the turn, read by {@link rateLimitFromInfo}. */
+  rateLimit: RateLimitReading | undefined;
   /**
    * The model version the upstream actually resolved + used, as reported
    * by the Claude CLI in its assistant message envelope. Caller passes
@@ -67,13 +70,37 @@ interface StreamEvent {
      *  on assistant events from the Claude CLI's stream-json output. */
     model?: string;
   };
-  rate_limit_info?: { status?: string };
+  rate_limit_info?: unknown;
   subtype?: string;
   is_error?: boolean;
   errors?: string[];
   stop_reason?: string;
   result?: string;
   usage?: CLIUsage;
+}
+
+/**
+ * The reading carried by a `rate_limit_event`, or undefined when the event has
+ * no usable status.
+ *
+ * Shape verified in the installed CLI (2.1.257), which builds `rate_limit_info`
+ * as `{ status, resetsAt?, rateLimitType?, utilization?, ... }`. `resetsAt` is
+ * epoch SECONDS: the CLI itself tests `resetsAt*1000 <= Date.now()`. Keeping
+ * only the status is what left `/metrics` unable to say when the quota comes
+ * back.
+ *
+ * This is a faithful read, unit conversion included; whether the instant is
+ * plausible enough to publish is the tracker's call (rate-limit-state.ts).
+ */
+export function rateLimitFromInfo(info: unknown): RateLimitReading | undefined {
+  if (typeof info !== "object" || info === null) return undefined;
+  const { status, resetsAt, rateLimitType } = info as Record<string, unknown>;
+  if (typeof status !== "string" || status === "") return undefined;
+  return {
+    status,
+    ...(typeof resetsAt === "number" && Number.isFinite(resetsAt) && { resetsAtMs: resetsAt * 1000 }),
+    ...(typeof rateLimitType === "string" && rateLimitType !== "" && { rateLimitType }),
+  };
 }
 
 export async function* linesOf(
@@ -125,7 +152,7 @@ export async function parseStream(
       cacheCreationTokens = usage.cache_creation_input_tokens;
   };
   let stopReason = "end_turn";
-  let rateLimitStatus: string | undefined;
+  let rateLimit: RateLimitReading | undefined;
   let modelVersion: string | undefined;
   let isError = false;
   let errorMessage: string | undefined;
@@ -141,7 +168,7 @@ export async function parseStream(
     }
 
     if (evt.type === "rate_limit_event") {
-      rateLimitStatus = evt.rate_limit_info?.status;
+      rateLimit = rateLimitFromInfo(evt.rate_limit_info) ?? rateLimit;
       continue;
     }
 
@@ -200,7 +227,7 @@ export async function parseStream(
     cacheReadTokens,
     cacheCreationTokens,
     stopReason,
-    rateLimitStatus,
+    rateLimit,
     modelVersion,
     isError,
     errorMessage,

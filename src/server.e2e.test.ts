@@ -20,12 +20,14 @@ let proc: ChildProcess | undefined;
 let fakeBin = "";
 
 const base = `http://127.0.0.1:${PORT}`;
+/** The reset the fake CLI announces on every normal turn: three hours out. */
+const TURN_RESETS_AT_SEC = Math.floor(Date.now() / 1000) + 3 * 3600;
 
 before(async () => {
   // server.ts isn't importable under strip-types — test the built artifact.
   execFileSync("npm", ["run", "build"], { cwd: root, stdio: "ignore" });
 
-  // Fake `claude`: drain stdin, emit one assistant turn + a result, exit 0.
+  // Fake `claude`: drain stdin, emit one turn (turn.jsonl), exit 0.
   fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-e2e-bin-"));
   const fake = path.join(fakeBin, "claude");
   // Cache counters are part of the fixture on purpose: the CLI puts almost the
@@ -36,9 +38,22 @@ before(async () => {
   const assistant =
     `{"type":"assistant","message":{"content":[{"type":"text","text":"pong"}],"usage":${usage},"model":"claude-haiku-4-5"}}`;
   const result = `{"type":"result","stop_reason":"end_turn","usage":${usage}}`;
+  // Every normal turn opens with a rate_limit_event in the CLI's real shape
+  // (resetsAt in epoch SECONDS), so /metrics has a full reading to publish.
+  const rateLimitEvent = JSON.stringify({
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed_warning",
+      resetsAt: TURN_RESETS_AT_SEC,
+      rateLimitType: "five_hour",
+      utilization: 0.9,
+      isUsingOverage: false,
+    },
+  });
+  fs.writeFileSync(path.join(fakeBin, "turn.jsonl"), [rateLimitEvent, assistant, result].join("\n") + "\n");
   fs.writeFileSync(
     fake,
-    `#!/usr/bin/env bash\ncat > /dev/null\nprintf '%s\\n' '${assistant}'\nprintf '%s\\n' '${result}'\nexit 0\n`,
+    ["#!/usr/bin/env bash", "cat > /dev/null", `cat '${fakeBin}/turn.jsonl'`, "exit 0", ""].join("\n"),
   );
   fs.chmodSync(fake, 0o755);
 
@@ -197,4 +212,23 @@ test("streaming -> final chunk carries usage so the client can size the context"
   // Usage rides the terminal chunk, so a client that stops at finish_reason
   // still sees it.
   assert.equal(withUsage[0].choices[0].finish_reason, "stop");
+});
+
+async function metricsRateLimit(): Promise<any> {
+  const r = await fetch(`${base}/metrics`);
+  assert.equal(r.status, 200);
+  return ((await r.json()) as any).rateLimit;
+}
+
+test("/metrics publishes the rate_limit_event's reset, in ms, and its window", async () => {
+  const r = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-haiku-4", messages: [{ role: "user", content: "hi" }] }),
+  });
+  assert.equal(r.status, 200);
+  const rl = await metricsRateLimit();
+  assert.equal(rl.status, "allowed_warning");
+  assert.equal(rl.resetsAtMs, TURN_RESETS_AT_SEC * 1000);
+  assert.equal(rl.rateLimitType, "five_hour");
 });

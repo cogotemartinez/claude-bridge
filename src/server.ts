@@ -11,7 +11,7 @@ import {
   enqueueRequest,
   getMetrics,
   isPathDEnabled,
-  recordRateLimitStatus,
+  recordRateLimit,
   recordResolvedModel,
   type Effort,
 } from "./cli-worker.js";
@@ -357,7 +357,7 @@ async function handlePersistentNonStreaming(
 ): Promise<void> {
   try {
     const result = await enqueuePersistent(req, undefined, signal);
-    recordRateLimitStatus(result.rateLimitStatus);
+    recordRateLimit(result.rateLimit);
     recordResolvedModel(modelId, result.modelVersion);
     const duration = Date.now() - startTime;
     log("info", "Response", {
@@ -366,7 +366,7 @@ async function handlePersistentNonStreaming(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls.length,
-      rateLimitStatus: result.rateLimitStatus,
+      rateLimitStatus: result.rateLimit?.status,
       pathD: true,
       continuation: !!req.pendingToolResult,
     });
@@ -476,7 +476,7 @@ async function handlePersistentStreaming(
       },
     }, signal);
 
-    recordRateLimitStatus(result.rateLimitStatus);
+    recordRateLimit(result.rateLimit);
     recordResolvedModel(modelId, result.modelVersion);
     const duration = Date.now() - startTime;
     log("info", "Response", {
@@ -485,7 +485,7 @@ async function handlePersistentStreaming(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls.length,
-      rateLimitStatus: result.rateLimitStatus,
+      rateLimitStatus: result.rateLimit?.status,
       pathD: true,
       continuation: !!req.pendingToolResult,
       streamed: true,
@@ -542,7 +542,7 @@ async function handleNonStreaming(
 ): Promise<void> {
   try {
     const result = await enqueueRequest(cliReq, undefined, signal);
-    recordRateLimitStatus(result.rateLimitStatus);
+    recordRateLimit(result.rateLimit);
     recordResolvedModel(modelId, result.modelVersion);
     const duration = Date.now() - startTime;
     log("info", "Response", {
@@ -551,7 +551,7 @@ async function handleNonStreaming(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls.length,
-      rateLimitStatus: result.rateLimitStatus,
+      rateLimitStatus: result.rateLimit?.status,
     });
     sendJson(res, 200, buildCompletionResponse(result, modelId));
   } catch (err) {
@@ -675,7 +675,7 @@ async function handleStreaming(
       },
     }, signal);
 
-    recordRateLimitStatus(result.rateLimitStatus);
+    recordRateLimit(result.rateLimit);
     recordResolvedModel(modelId, result.modelVersion);
     const duration = Date.now() - startTime;
     log("info", "Response", {
@@ -684,7 +684,7 @@ async function handleStreaming(
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
       toolCalls: result.toolCalls.length,
-      rateLimitStatus: result.rateLimitStatus,
+      rateLimitStatus: result.rateLimit?.status,
       streamed: true,
     });
 

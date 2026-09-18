@@ -22,6 +22,11 @@ import {
   type StreamToolUse,
 } from "./stream-parser.js";
 import { pushPluginIsolationArgs } from "./plugin-isolation.js";
+import {
+  createRateLimitTracker,
+  type PublishedRateLimit,
+  type RateLimitReading,
+} from "./rate-limit-state.js";
 
 const MCP_SERVER_NAME = "openclaw";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -93,7 +98,8 @@ export interface CLIResult {
   cacheCreationTokens: number;
   stopReason: string;
   sessionId: string;
-  rateLimitStatus: string | undefined;
+  /** The turn's last `rate_limit_event`, if the CLI sent one. */
+  rateLimit: RateLimitReading | undefined;
   /** Resolved model version (e.g. "claude-opus-4-5-20251201") that the
    *  upstream CLI reported in its stream. Differs from `request.model`
    *  (a short alias like "opus") and from the OpenAI-shape `model` field
@@ -457,7 +463,7 @@ export async function enqueuePersistent(
         cacheCreationTokens: cp.result?.cacheCreationTokens ?? 0,
         stopReason,
         sessionId: session.sessionId,
-        rateLimitStatus: cp.result?.rateLimitStatus,
+        rateLimit: cp.result?.rateLimit,
         modelVersion: cp.result?.modelVersion,
       };
     } catch (err) {
@@ -925,7 +931,7 @@ async function runCLI(
       cacheCreationTokens: parsed.cacheCreationTokens,
       stopReason,
       sessionId,
-      rateLimitStatus: parsed.rateLimitStatus,
+      rateLimit: parsed.rateLimit,
       modelVersion: parsed.modelVersion,
     };
   } finally {
@@ -935,35 +941,26 @@ async function runCLI(
 }
 
 // ─── Rate-limit tracker ─────────────────────────────────────────────────────
-// Latest rate_limit_event seen from any in-flight session. Surfaces via
-// getMetrics() so the UI can warn the user before they fire a costly
-// cron. Captures the raw status string ("standard", "warning", "approaching",
-// "exhausted") + when it landed, so callers can age out stale data.
+// Latest quota reading from any session: the upstream status ("allowed",
+// "allowed_warning", "rejected"), when the limiting window resets and which
+// window it is. Surfaces via getMetrics() so the UI can warn before a costly
+// cron fires, and say when the quota comes back. Validation and shape live in
+// rate-limit-state.ts, where the tests can reach them.
 
-let latestRateLimit: { status: string; updatedAtMs: number } | null = null;
+const rateLimitTracker = createRateLimitTracker();
 
 /**
- * Record a rate_limit_event status from a finished CLI worker. Called by
- * the session-pool path after each model invocation that streamed one.
- * Safe to call with `undefined` — those are ignored so the previous good
- * status sticks until something fresher arrives.
+ * Publish a quota reading: a finished turn's `rate_limit_event`, or the
+ * "rejected" reading the server derives from a quota-exhausted 429. Safe to
+ * call with `undefined` — ignored, so the last reading sticks until something
+ * fresher arrives.
  */
-export function recordRateLimitStatus(status: string | undefined): void {
-  if (!status) return;
-  latestRateLimit = { status, updatedAtMs: Date.now() };
+export function recordRateLimit(reading: RateLimitReading | undefined): void {
+  rateLimitTracker.record(reading);
 }
 
-export function getLatestRateLimit(): {
-  status: string;
-  updatedAtMs: number;
-  ageMs: number;
-} | null {
-  if (!latestRateLimit) return null;
-  return {
-    status: latestRateLimit.status,
-    updatedAtMs: latestRateLimit.updatedAtMs,
-    ageMs: Date.now() - latestRateLimit.updatedAtMs,
-  };
+export function getLatestRateLimit(): PublishedRateLimit | null {
+  return rateLimitTracker.snapshot();
 }
 
 // ─── Resolved model version tracker ─────────────────────────────────────────
@@ -1054,7 +1051,7 @@ export interface BridgeMetrics {
   activeProcesses: number;
   sessions: number;
   sessionTails: number;
-  rateLimit: { status: string; updatedAtMs: number; ageMs: number } | null;
+  rateLimit: PublishedRateLimit | null;
   /** Latest upstream-resolved model version per slug we've served. Useful
    *  for spotting silent upstream version flips (e.g. opus alias starts
    *  resolving to a newer model with different behavior). */
@@ -1081,9 +1078,9 @@ export function getMetrics(): BridgeMetrics {
     activeProcesses: activeProcs.size,
     sessions: sessions.size,
     sessionTails: sessionTail.size,
-    // Surface the most recent rate_limit_event status the upstream
-    // Anthropic API sent us. `null` until we've seen at least one
-    // streaming response (i.e. immediately after bridge boot).
+    // The latest quota reading: the upstream rate_limit_event, or "rejected"
+    // from a quota-exhausted 429. `null` until either has happened (i.e.
+    // immediately after bridge boot).
     rateLimit: getLatestRateLimit(),
     // Latest upstream-resolved model version per slug we've served.
     // Empty until we've seen at least one assistant event for each slug.
