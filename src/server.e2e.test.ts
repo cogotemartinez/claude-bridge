@@ -27,7 +27,8 @@ before(async () => {
   // server.ts isn't importable under strip-types — test the built artifact.
   execFileSync("npm", ["run", "build"], { cwd: root, stdio: "ignore" });
 
-  // Fake `claude`: drain stdin, emit one turn (turn.jsonl), exit 0.
+  // Fake `claude`: drain stdin, emit one turn (turn.jsonl, or quota.jsonl when
+  // the prompt asks for it), exit 0.
   fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-e2e-bin-"));
   const fake = path.join(fakeBin, "claude");
   // Cache counters are part of the fixture on purpose: the CLI puts almost the
@@ -51,9 +52,17 @@ before(async () => {
     },
   });
   fs.writeFileSync(path.join(fakeBin, "turn.jsonl"), [rateLimitEvent, assistant, result].join("\n") + "\n");
+  // A prompt carrying QUOTA_EXHAUSTED gets the quota notice instead, written
+  // by the test itself so the reset time is relative to when it runs.
   fs.writeFileSync(
     fake,
-    ["#!/usr/bin/env bash", "cat > /dev/null", `cat '${fakeBin}/turn.jsonl'`, "exit 0", ""].join("\n"),
+    [
+      "#!/usr/bin/env bash",
+      'prompt="$(cat)"',
+      `case "$prompt" in *QUOTA_EXHAUSTED*) cat '${fakeBin}/quota.jsonl' ;; *) cat '${fakeBin}/turn.jsonl' ;; esac`,
+      "exit 0",
+      "",
+    ].join("\n"),
   );
   fs.chmodSync(fake, 0o755);
 
@@ -231,4 +240,37 @@ test("/metrics publishes the rate_limit_event's reset, in ms, and its window", a
   assert.equal(rl.status, "allowed_warning");
   assert.equal(rl.resetsAtMs, TURN_RESETS_AT_SEC * 1000);
   assert.equal(rl.rateLimitType, "five_hour");
+});
+
+test("an exhausted quota answers 429 and /metrics turns rejected, with the same reset", async () => {
+  // Two hours out, to the minute, written the way the CLI writes it.
+  const reset = new Date(Date.now() + 2 * 3600 * 1000);
+  reset.setSeconds(0, 0);
+  const h12 = reset.getHours() % 12 || 12;
+  const label = `${h12}:${String(reset.getMinutes()).padStart(2, "0")}${reset.getHours() < 12 ? "am" : "pm"}`;
+  const notice = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "text", text: `You've hit your limit · resets ${label}` }] },
+  });
+  fs.writeFileSync(
+    path.join(fakeBin, "quota.jsonl"),
+    `${notice}\n{"type":"result","stop_reason":"end_turn"}\n`,
+  );
+
+  const r = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "claude-haiku-4", messages: [{ role: "user", content: "QUOTA_EXHAUSTED" }] }),
+  });
+  assert.equal(r.status, 429);
+  const retryAfter = Number(r.headers.get("retry-after"));
+  assert.ok(retryAfter > 0, "429 carries Retry-After");
+
+  const rl = await metricsRateLimit();
+  assert.equal(rl.status, "rejected");
+  assert.equal(rl.resetsAtMs, reset.getTime());
+  assert.ok(Math.abs(Date.now() + retryAfter * 1000 - rl.resetsAtMs) < 5000, "Retry-After and resetsAtMs agree");
+  // The previous reading's window is not carried over into the new one.
+  assert.equal("rateLimitType" in rl, false);
+  assert.ok(rl.ageMs < 5000, "the reading is fresh, not the pre-outage one");
 });

@@ -803,7 +803,13 @@ function quotaAwareErrorResponse(
 ): { status: number; headers?: Record<string, string> } {
   // El mensaje llega ENVUELTO por el worker; desenvolver y clasificar es una
   // sola cosa y vive en el módulo puro, que es el que conoce el formato.
-  return quotaAwareErrorStatus(message, isTimeout);
+  const mapped = quotaAwareErrorStatus(message, isTimeout);
+  // Every failed request funnels through here, so this is the one place that
+  // publishes the "rejected" reading. The CLI sends no rate_limit_event once
+  // the quota is gone; without this /metrics stayed frozen on the last
+  // pre-outage status for the whole outage.
+  recordRateLimit(mapped.rateLimit);
+  return mapped;
 }
 
 function sendJson(

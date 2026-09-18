@@ -5,6 +5,7 @@ import {
   plausibleResetsAtMs,
   RESETS_AT_MAX_AHEAD_MS,
 } from "./rate-limit-state.ts";
+import { CLI_ERROR_AS_CONTENT_PREFIX, quotaAwareErrorStatus } from "./error-as-content.ts";
 
 const NOW = Date.UTC(2026, 8, 14, 12, 0, 0); // 2026-09-14T12:00:00Z
 const IN_SEVEN_HOURS = NOW + 7 * 3600 * 1000;
@@ -73,4 +74,50 @@ test("a turn without a reading keeps the last one; a new reading replaces it who
     updatedAtMs: NOW + 120_000,
     ageMs: 0,
   });
+});
+
+// ── The exhausted-quota path ────────────────────────────────────────────────
+// Once the quota is gone the CLI sends no rate_limit_event, only the notice.
+// The 429 mapping is then the only fresh evidence, and it has to reach the
+// published state with the same reset instant that feeds Retry-After.
+
+test("exhausted quota: the 429 leaves the published state rejected, with its reset", () => {
+  const now = new Date(2026, 8, 14, 7, 25, 0); // local time, like the notice
+  const t = createRateLimitTracker();
+  t.record({ status: "allowed_warning", rateLimitType: "five_hour" }, now.getTime() - 3600_000);
+
+  const mapped = quotaAwareErrorStatus(
+    `${CLI_ERROR_AS_CONTENT_PREFIX}You've hit your limit · resets 8:10am`,
+    false,
+    now,
+  );
+  assert.equal(mapped.status, 429);
+  t.record(mapped.rateLimit, now.getTime());
+
+  const expected = new Date(2026, 8, 14, 8, 10, 0).getTime();
+  const snap = t.snapshot(now.getTime());
+  assert.equal(snap?.status, "rejected");
+  assert.equal(snap?.resetsAtMs, expected);
+  assert.equal(snap?.updatedAtMs, now.getTime());
+  // Same instant as the header: they are derived from one parse.
+  assert.equal(now.getTime() + Number(mapped.headers?.["Retry-After"]) * 1000, expected);
+  // The notice does not name the window in upstream's vocabulary.
+  assert.equal(snap !== null && "rateLimitType" in snap, false);
+});
+
+test("exhausted quota with an unreadable reset: rejected, and no invented time", () => {
+  const t = createRateLimitTracker();
+  const mapped = quotaAwareErrorStatus(`${CLI_ERROR_AS_CONTENT_PREFIX}You've hit your limit · resets soon`, false);
+  t.record(mapped.rateLimit, NOW);
+  assert.deepEqual(t.snapshot(NOW), { status: "rejected", updatedAtMs: NOW, ageMs: 0 });
+});
+
+test("any other failure publishes nothing", () => {
+  for (const [message, isTimeout] of [
+    [`${CLI_ERROR_AS_CONTENT_PREFIX}API Error: 500 boom`, false],
+    ["CLI error: exit 1", false],
+    ["CLI timeout after 600000ms", true],
+  ] as const) {
+    assert.equal(quotaAwareErrorStatus(message, isTimeout).rateLimit, undefined, message);
+  }
 });

@@ -8,9 +8,12 @@
  *  fallback logic never fires. Seen in production as jarvis replying
  *  "API Error: 400 ... out of extra usage" to a plain "hola".
  *
- *  Kept as a zero-import pure module so the test runner stays happy under
- *  --experimental-strip-types (same pattern as session-pool-decision.ts).
+ *  Kept free of runtime imports so the test runner stays happy under
+ *  --experimental-strip-types (same pattern as session-pool-decision.ts); a
+ *  type-only import is erased before it would be resolved.
  */
+
+import type { RateLimitReading } from "./rate-limit-state.js";
 
 /** Strict prefix: the CLI error line always starts with "API Error:"
  *  followed by an HTTP status code. Anchored + status-digit-checked so a
@@ -141,13 +144,14 @@ export function couldBeErrorAsContent(text: string): boolean {
  * episodio convirtió 1 corrida planificada en 4 intentos y después PERDIÓ la
  * corrida (una de ellas semanal).
  *
- * Devuelve segundos hasta el reset (para `Retry-After`), o undefined si la
- * línea no dice nada parseable. Deliberadamente tolerante: si no se entiende la
- * hora, mejor no inventar una espera.
+ * Returns the reset as an epoch-ms instant, or undefined when the line says
+ * nothing parseable. Deliberately tolerant: if the time cannot be read, better
+ * not to invent a wait. `Retry-After` and the "rejected" reading on /metrics
+ * are both derived from this one instant, so they cannot disagree.
  */
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
 
-export function quotaRetryAfterSeconds(text: string, now = new Date()): number | undefined {
+export function quotaResetsAtMs(text: string, now = new Date()): number | undefined {
   // El límite SEMANAL nombra el día: `resets Sep 11 at 11am`. Medido en los
   // logs del 08 al 11-09-2026: de 204 episodios de cuota, 156 (el 76%) traen
   // esa forma con fecha. La versión anterior exigía un dígito pegado a
@@ -175,21 +179,32 @@ export function quotaRetryAfterSeconds(text: string, now = new Date()): number |
     target.setHours(hour, minute, 0, 0);
     // Un mes ya pasado es el del año que viene (diciembre visto en enero).
     if (target.getTime() <= now.getTime()) target.setFullYear(target.getFullYear() + 1);
-    const secs = Math.round((target.getTime() - now.getTime()) / 1000);
+    const secs = secondsUntil(target.getTime(), now);
     // Con fecha explícita el techo es de una semana larga: es un límite
     // semanal y la espera real puede ser de días, no de horas.
-    return secs > 0 && secs <= 8 * 24 * 3600 ? secs : undefined;
+    return secs > 0 && secs <= 8 * 24 * 3600 ? target.getTime() : undefined;
   }
   target.setHours(hour, minute, 0, 0);
   // Un reset "ya pasado" es el de mañana: la línea siempre mira hacia adelante.
   if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
-  const secs = Math.round((target.getTime() - now.getTime()) / 1000);
+  const secs = secondsUntil(target.getTime(), now);
   // 24h es el techo NATURAL: el "si ya pasó, es el de mañana" de arriba hace
   // que el resultado nunca pueda ser mayor por construcción. Poner menos
   // descartaba casos legítimos — con 6h se caía el reset de las 4pm visto
   // desde la mañana (8h35m), y con 12h el reset nocturno (12h10m). La basura
   // ya la ataja la validación de hora/minuto.
-  return secs > 0 && secs <= 24 * 3600 ? secs : undefined;
+  return secs > 0 && secs <= 24 * 3600 ? target.getTime() : undefined;
+}
+
+/** Whole seconds from `now` until `resetsAtMs`, as `Retry-After` wants them. */
+function secondsUntil(resetsAtMs: number, now: Date): number {
+  return Math.round((resetsAtMs - now.getTime()) / 1000);
+}
+
+/** Seconds until the reset the quota line announces (for `Retry-After`). */
+export function quotaRetryAfterSeconds(text: string, now = new Date()): number | undefined {
+  const resetsAtMs = quotaResetsAtMs(text, now);
+  return resetsAtMs === undefined ? undefined : secondsUntil(resetsAtMs, now);
 }
 
 /** Prefijo que el worker le antepone al texto del CLI cuando convierte una
@@ -221,17 +236,28 @@ export function unwrapCliErrorText(message: string): string {
  *  Es el camino REAL: recibe lo mismo que recibe el servidor, un
  *  `err.message` posiblemente envuelto, y desenvuelve antes de clasificar.
  *  Los detectores de arriba están anclados al comienzo de la línea del CLI y
- *  solo funcionan sobre el texto crudo. */
+ *  solo funcionan sobre el texto crudo.
+ *
+ *  An exhausted quota also yields `rateLimit`, the reading to publish: the CLI
+ *  sends no `rate_limit_event` once the quota is gone, so this 429 is the only
+ *  fresh evidence there is, and without it /metrics keeps reciting the last
+ *  pre-outage status. The window type is left out because the notice does not
+ *  name it in upstream's vocabulary. */
 export function quotaAwareErrorStatus(
   message: string,
   isTimeout: boolean,
   now = new Date(),
-): { status: number; headers?: Record<string, string> } {
+): { status: number; headers?: Record<string, string>; rateLimit?: RateLimitReading } {
   if (isTimeout) return { status: 504 };
   const cliText = unwrapCliErrorText(message);
   if (!isQuotaExhaustedText(cliText)) return { status: 500 };
-  const secs = quotaRetryAfterSeconds(cliText, now);
-  return { status: 429, headers: secs ? { "Retry-After": String(secs) } : undefined };
+  const resetsAtMs = quotaResetsAtMs(cliText, now);
+  const secs = resetsAtMs === undefined ? undefined : secondsUntil(resetsAtMs, now);
+  return {
+    status: 429,
+    headers: secs ? { "Retry-After": String(secs) } : undefined,
+    rateLimit: { status: "rejected", ...(resetsAtMs !== undefined && { resetsAtMs }) },
+  };
 }
 
 /** True cuando el texto ES la línea de cuota agotada (no un error cualquiera). */
