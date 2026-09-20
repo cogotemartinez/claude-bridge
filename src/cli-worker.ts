@@ -409,26 +409,30 @@ export async function enqueuePersistent(
       // and the stream usually wins by a few ms; without this gate, a
       // fast caller round-trips with a tool_result before pending exists
       // and resolveToolCall throws "no pending tool call".
-      if (cp.toolUse) {
-        await mcpServer.waitForPending(
-          request.sessionKey,
-          cp.toolUse.toolUseId,
-          // Same budget the checkpoint read above gets: a continuation in a
-          // large session can take minutes to reach its own tool call, and a
-          // shorter gate here just fails the turn before its deadline.
-          mcpPendingTimeoutMs(process.env, poolConfig.timeoutMs),
-          cp.toolUse.name,
-        );
-      }
+      // The gate returns the call the CLI REALLY made, which is not always the
+      // one the stream announced: a turn can carry several tool_use blocks and
+      // the CLI picks the order. Forward the invocation, not the announcement,
+      // or its POST is never answered and both sides wait out the budget.
+      const invoked = cp.toolUse
+        ? await mcpServer.waitForPending(
+            request.sessionKey,
+            cp.toolUse.toolUseId,
+            // Same budget the checkpoint read above gets: a continuation in a
+            // large session can take minutes to reach its own tool call, and a
+            // shorter gate here just fails the turn before its deadline.
+            mcpPendingTimeoutMs(process.env, poolConfig.timeoutMs),
+            cp.toolUse.name,
+          )
+        : null;
 
-      const toolCalls: CLIToolCall[] = cp.toolUse
+      const toolCalls: CLIToolCall[] = invoked
         ? [
             {
-              id: cp.toolUse.toolUseId,
-              name: cp.toolUse.name.startsWith("mcp__openclaw__")
-                ? cp.toolUse.name.slice("mcp__openclaw__".length)
-                : cp.toolUse.name,
-              input: cp.toolUse.args,
+              id: invoked.toolUseId,
+              name: invoked.name.startsWith("mcp__openclaw__")
+                ? invoked.name.slice("mcp__openclaw__".length)
+                : invoked.name,
+              input: invoked.args,
             },
           ]
         : [];

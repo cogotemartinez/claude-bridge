@@ -69,6 +69,90 @@ test("waitForPending resolves on the tools/call event (real loopback server)", a
   await server.stop();
 });
 
+test("the gate resolves on the tool the CLI really called, not the one announced first", async () => {
+  // The 2026-09-19 deadlock. An assistant turn can carry SEVERAL tool_use
+  // blocks; nextCheckpoint hands back only the first and buffers the rest,
+  // while the CLI invokes them in its own order. The bridge announced `exec`
+  // and the CLI POSTed `memory_search`: nobody resolved that POST, because the
+  // gateway was never told about it, so the CLI blocked on its result and the
+  // bridge blocked on a different id. Both sides waited out the whole budget.
+  const server = new BridgeMcpHttpServer();
+  const port = await server.start(0);
+  const key = "agent:test:parallel-toolcalls";
+  server.registerSession(key, [
+    { name: "exec", inputSchema: { type: "object" } },
+    { name: "memory_search", inputSchema: { type: "object" } },
+  ]);
+  const announced = "toolu_announced_exec";
+  const actuallyCalled = "toolu_actual_memory_search";
+  const url = `http://127.0.0.1:${port}/${encodeURIComponent(key)}`;
+
+  const post = fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "memory_search",
+        arguments: {},
+        _meta: { "claudecode/toolUseId": actuallyCalled },
+      },
+    }),
+  }).catch(() => undefined);
+
+  try {
+    const landed = await server.waitForPending(key, announced, 2000, "exec");
+
+    // It must report the call that actually arrived, so the caller forwards
+    // THAT one to the gateway and the CLI gets its result.
+    assert.equal(landed.toolUseId, actuallyCalled);
+    assert.equal(landed.name, "memory_search");
+  } finally {
+    // Always close the parked POST, or a red run hangs the whole suite.
+    server.tryResolveToolCall(key, actuallyCalled, [{ type: "text", text: "ok" }]);
+    await post;
+    await server.stop();
+  }
+});
+
+test("the gate still prefers the announced tool when that is the one that lands", async () => {
+  // Negative control for the change above: with no surprise, nothing changes.
+  const server = new BridgeMcpHttpServer();
+  const port = await server.start(0);
+  const key = "agent:test:single-toolcall";
+  server.registerSession(key, [{ name: "search", inputSchema: { type: "object" } }]);
+  const toolUseId = "toolu_expected";
+  const url = `http://127.0.0.1:${port}/${encodeURIComponent(key)}`;
+
+  const post = fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "search",
+        arguments: {},
+        _meta: { "claudecode/toolUseId": toolUseId },
+      },
+    }),
+  }).catch(() => undefined);
+
+  try {
+    const landed = await server.waitForPending(key, toolUseId, 2000, "search");
+
+    assert.equal(landed.toolUseId, toolUseId);
+    assert.equal(landed.name, "search");
+  } finally {
+    server.tryResolveToolCall(key, toolUseId, [{ type: "text", text: "ok" }]);
+    await post;
+    await server.stop();
+  }
+});
+
 test("the MCP pending gate waits the turn's own budget, and takes an override from the env", () => {
   // Was a hard 10s, then briefly a hard 60s earlier the same day. Both were
   // invented numbers: measured on 2026-09-19, a continuation in a 304k-token

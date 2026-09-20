@@ -27,6 +27,11 @@ export interface McpTool {
 
 interface PendingCall {
   toolUseId: string;
+  /** Tool name and arguments as the CLI actually called them. The stream-json
+   *  tool_use block is only an announcement; THIS is the invocation, and when
+   *  the two disagree (see waitForPending) the invocation is what counts. */
+  name: string;
+  args: Record<string, unknown>;
   rpcId: number | string;
   res: ServerResponse;
   resolved: boolean;
@@ -66,6 +71,10 @@ interface SessionContext {
    *  the instant the matching pending is created, so the common path resolves
    *  on an event instead of a busy poll. */
   waiters: Map<string, Array<() => void>>;
+  /** Resolvers woken by ANY new pending, whatever its id. A waiter cannot key
+   *  on the announced id alone: the CLI may call a different one of the turn's
+   *  tool_use blocks first. */
+  anyWaiters: Array<() => void>;
 }
 
 const JSON_RPC_INVALID = -32600;
@@ -167,7 +176,7 @@ export class BridgeMcpHttpServer {
   registerSession(sessionKey: string, tools: McpTool[]): void {
     let ctx = this.sessions.get(sessionKey);
     if (!ctx) {
-      ctx = { sessionKey, tools, pending: new Map(), waiters: new Map() };
+      ctx = { sessionKey, tools, pending: new Map(), waiters: new Map(), anyWaiters: [] };
       this.sessions.set(sessionKey, ctx);
     } else {
       ctx.tools = tools;
@@ -187,34 +196,67 @@ export class BridgeMcpHttpServer {
     this.sessions.delete(sessionKey);
   }
 
-  /** Block briefly until the MCP POST for this tool_use_id lands in the
-   *  pending map. The stream-json event that the bridge reads from the CLI
-   *  can fire slightly before the MCP tools/call HTTP request arrives here,
-   *  so the bridge needs to wait for this gate before returning the
-   *  tool_use to the OAI caller — otherwise a fast caller round-trips with
-   *  a tool_result before pending exists and tryResolveToolCall misses. */
+  /** The call the CLI actually made, preferring `toolUseId` but accepting any
+   *  other outstanding one. An assistant turn can carry SEVERAL tool_use
+   *  blocks; nextCheckpoint hands the worker only the first and buffers the
+   *  rest, while the CLI invokes them in its own order. */
+  private landedPending(
+    ctx: SessionContext,
+    toolUseId: string,
+  ): CapturedToolUse | undefined {
+    const exact = this.findPending(ctx, toolUseId);
+    if (exact) {
+      return { toolUseId: exact.key, name: exact.pending.name, args: exact.pending.args };
+    }
+    // Oldest outstanding call wins, so a queue of them drains in arrival order.
+    let oldest: PendingCall | undefined;
+    let oldestKey = "";
+    for (const [key, pending] of ctx.pending) {
+      if (pending.resolved) continue;
+      if (!oldest || pending.seq < oldest.seq) {
+        oldest = pending;
+        oldestKey = key;
+      }
+    }
+    return oldest ? { toolUseId: oldestKey, name: oldest.name, args: oldest.args } : undefined;
+  }
+
+  /** Block until the CLI's MCP POST for this turn's tool call lands, and
+   *  return the call that actually arrived.
+   *
+   *  The gate exists because the stream-json tool_use event usually beats the
+   *  HTTP POST by a few ms, and without it a fast caller round-trips a
+   *  tool_result before the pending exists and tryResolveToolCall misses.
+   *
+   *  It returns the landed call rather than void because the announced id is
+   *  only a hint. On 2026-09-19 a turn deadlocked for the full budget: the
+   *  stream announced `exec`, the CLI POSTed `memory_search` (the turn's other
+   *  tool_use block), and the two sides waited on each other — the bridge for
+   *  an id that would not come until the CLI was unblocked, the CLI for a
+   *  result the gateway was never asked to produce. Whatever the CLI really
+   *  invoked is the invocation; the caller forwards THAT. */
   async waitForPending(
     sessionKey: string,
     toolUseId: string,
     timeoutMs = mcpPendingTimeoutMs(),
     toolName?: string,
-  ): Promise<void> {
+  ): Promise<CapturedToolUse> {
     const ctx = this.sessions.get(sessionKey);
     if (!ctx) throw new Error(`session not registered: ${sessionKey}`);
-    if (this.findPending(ctx, toolUseId)) return;
+    const early = this.landedPending(ctx, toolUseId);
+    if (early) return early;
     const deadline = Date.now() + timeoutMs;
-    // Resolve on whichever fires first: the exact-id creation EVENT (the
-    // common path — handleToolsCall wakes us the instant the pending lands,
-    // and waitForPending is always called with the canonical CLI id that the
-    // pending is keyed under, so the event hits), or a COARSE poll backstop
-    // (covers any missed event / fuzzy-id edge without the old 10ms busy
-    // loop's per-tick Promise+timer churn).
-    await new Promise<void>((resolve, reject) => {
+    // Resolve on whichever fires first: the creation EVENT (the common path —
+    // handleToolsCall wakes us the instant a pending lands), or a COARSE poll
+    // backstop (covers any missed event / fuzzy-id edge without the old 10ms
+    // busy loop's per-tick Promise+timer churn).
+    return await new Promise<CapturedToolUse>((resolve, reject) => {
       let done = false;
       const onEvent = (): void => {
-        if (this.findPending(ctx, toolUseId)) finish();
+        const landed = this.landedPending(ctx, toolUseId);
+        if (landed) finish(undefined, landed);
       };
-      const finish = (err?: Error): void => {
+      const finish = (err?: Error, landed?: CapturedToolUse): void => {
         if (done) return;
         done = true;
         clearInterval(poll);
@@ -224,14 +266,18 @@ export class BridgeMcpHttpServer {
           if (i >= 0) ws.splice(i, 1);
           if (ws.length === 0) ctx.waiters.delete(toolUseId);
         }
+        const ai = ctx.anyWaiters.indexOf(onEvent);
+        if (ai >= 0) ctx.anyWaiters.splice(ai, 1);
         if (err) reject(err);
-        else resolve();
+        else resolve(landed as CapturedToolUse);
       };
       const arr = ctx.waiters.get(toolUseId) ?? [];
       arr.push(onEvent);
       ctx.waiters.set(toolUseId, arr);
+      ctx.anyWaiters.push(onEvent);
       const poll = setInterval(() => {
-        if (this.findPending(ctx, toolUseId)) finish();
+        const landed = this.landedPending(ctx, toolUseId);
+        if (landed) finish(undefined, landed);
         else if (Date.now() >= deadline) {
           finish(
             new Error(
@@ -241,8 +287,8 @@ export class BridgeMcpHttpServer {
         }
       }, 100);
       // Re-check synchronously in case the pending landed between the initial
-      // findPending above and registering the waiter.
-      if (this.findPending(ctx, toolUseId)) finish();
+      // check above and registering the waiter.
+      onEvent();
     });
   }
 
@@ -491,6 +537,8 @@ export class BridgeMcpHttpServer {
     const seq = ++pendingSeq;
     const pending: PendingCall = {
       toolUseId,
+      name,
+      args,
       rpcId,
       res,
       resolved: false,
@@ -513,6 +561,12 @@ export class BridgeMcpHttpServer {
     if (woken && woken.length) {
       ctx.waiters.delete(toolUseId);
       for (const w of woken.slice()) w();
+    }
+    // And wake anyone waiting on a DIFFERENT id of this same turn: the CLI is
+    // free to call the turn's tool_use blocks in any order, and this POST is
+    // the one it really made.
+    if (ctx.anyWaiters.length) {
+      for (const w of ctx.anyWaiters.slice()) w();
     }
     process.stdout.write(
       `${JSON.stringify({
