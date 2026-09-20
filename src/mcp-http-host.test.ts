@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BridgeMcpHttpServer, isLoopbackHost, mcpPendingTimeoutMs } from "./mcp-http.ts";
+import {
+  BridgeMcpHttpServer,
+  DEFAULT_TURN_BUDGET_MS,
+  isLoopbackHost,
+  mcpPendingTimeoutMs,
+} from "./mcp-http.ts";
 
 test("isLoopbackHost: accepts loopback hosts (with and without port)", () => {
   for (const h of [
@@ -160,8 +165,10 @@ test("the MCP pending gate waits the turn's own budget, and takes an override fr
   // gate cannot separate slow from stuck, so it waits as long as the turn may.
   assert.equal(mcpPendingTimeoutMs({}, 300_000), 300_000);
   assert.equal(mcpPendingTimeoutMs({}, 42_000), 42_000);
-  // No budget passed: the pool's own default, not something shorter.
-  assert.equal(mcpPendingTimeoutMs({}), 300_000);
+  // No budget passed: the shared turn budget, not something shorter.
+  assert.equal(mcpPendingTimeoutMs({}), DEFAULT_TURN_BUDGET_MS);
+  // And that budget sits just under OpenClaw's own 600s wait, not half of it.
+  assert.ok(DEFAULT_TURN_BUDGET_MS > 500_000 && DEFAULT_TURN_BUDGET_MS < 600_000);
   // An explicit override still wins over the budget, in both directions.
   assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "5000" }, 300_000), 5_000);
   assert.equal(

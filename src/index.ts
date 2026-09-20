@@ -8,10 +8,11 @@ import { BridgeMcpHttpServer } from "./mcp-http.js";
 import { PersistentSessionPool } from "./session-pool.js";
 import { configureDebugLogger, defaultDebugLogPath } from "./debug-logger.js";
 import { intEnv } from "./env.js";
+import { DEFAULT_TURN_BUDGET_MS } from "./mcp-http.js";
 
 const port = intEnv("CLAUDE_BRIDGE_PORT", 3456, { min: 0, max: 65535 });
 const host = process.env.CLAUDE_BRIDGE_HOST ?? "127.0.0.1";
-const timeoutMs = intEnv("CLAUDE_BRIDGE_TIMEOUT_MS", 300_000, { min: 1000 });
+const timeoutMs = intEnv("CLAUDE_BRIDGE_TIMEOUT_MS", DEFAULT_TURN_BUDGET_MS, { min: 1000 });
 const maxConcurrent = intEnv("CLAUDE_BRIDGE_MAX_CONCURRENT", 8, { min: 1 });
 const maxSessions = intEnv("CLAUDE_BRIDGE_MAX_SESSIONS", 200, { min: 1 });
 

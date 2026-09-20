@@ -108,6 +108,21 @@ export function isLoopbackHost(host: string | undefined): boolean {
 }
 
 /**
+ * How long one CLI turn may run before the bridge gives up on it.
+ *
+ * This has to sit just UNDER the caller's own timeout, not far below it. It was
+ * 300s while OpenClaw waits 600s (`timeoutMs=600000` on its model-fetch), so the
+ * bridge spent the second half of every long turn killing work its caller was
+ * still happily waiting for: on 2026-09-19 a continuation whose tool call landed
+ * at 291s was SIGTERMed at 300s, nine seconds too late to matter and five
+ * minutes of real work thrown away. Ending 30s early leaves room to answer with
+ * a real error instead of letting the caller time out on us.
+ *
+ * CLAUDE_BRIDGE_TIMEOUT_MS overrides it for a caller with a different bound.
+ */
+export const DEFAULT_TURN_BUDGET_MS = 570_000;
+
+/**
  * How long a tool_use announced on the CLI's stream may take to show up as an
  * MCP POST before the turn is failed. Defaults to the turn's own budget, which
  * callers pass in as `turnBudgetMs`.
@@ -128,7 +143,7 @@ export function isLoopbackHost(host: string | undefined): boolean {
  */
 export function mcpPendingTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
-  turnBudgetMs = 300_000,
+  turnBudgetMs = DEFAULT_TURN_BUDGET_MS,
 ): number {
   const raw = Number(env.CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : turnBudgetMs;

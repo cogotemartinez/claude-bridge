@@ -272,11 +272,25 @@ async function handleChatCompletions(
   const ultracodeHeader = req.headers["x-bridge-ultracode"];
   const ultracode = ultracodeHeader === "1" || ultracodeHeader === "true";
 
+  // Shape of the caller's last message. A turn that should be a tool_result
+  // continuation but arrives as plain user text silently leaves the CLI's
+  // parked MCP call unanswered, and the only symptom is a slow turn — so the
+  // log has to say which of the two this is, not just how many messages.
+  const lastMsg = oaiReq.messages[oaiReq.messages.length - 1];
+  const lastRole = lastMsg?.role ?? "none";
+  const lastHasToolResult =
+    lastMsg?.role === "tool" ||
+    (Array.isArray(lastMsg?.content) &&
+      (lastMsg.content as unknown as Array<Record<string, unknown>>).some(
+        (part) => part?.type === "tool_result",
+      ));
   log("info", "Request", {
     model: model.id,
     cliModel: model.cliAlias,
     stream: !!oaiReq.stream,
     messages: oaiReq.messages.length,
+    lastRole,
+    lastHasToolResult,
     tools: tools.length,
     hasSystemPrompt: !!built.systemPrompt,
     effort,

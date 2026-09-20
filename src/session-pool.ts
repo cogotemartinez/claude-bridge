@@ -29,6 +29,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { DEFAULT_TURN_BUDGET_MS } from "./mcp-http.js";
 import { randomUUID } from "node:crypto";
 import type { BridgeMcpHttpServer, CapturedToolUse, McpTool } from "./mcp-http.js";
 import {
@@ -126,7 +127,7 @@ const DEFAULT_CONFIG: PoolConfig = {
   idleEvictMs: envMs("CLAUDE_BRIDGE_IDLE_EVICT_MS", 3 * 60 * 60_000),
   maxLifetimeMs: envMs("CLAUDE_BRIDGE_MAX_LIFETIME_MS", 8 * 60 * 60_000),
   maxSessions: envMs("CLAUDE_BRIDGE_MAX_SESSIONS", 32),
-  nextCheckpointTimeoutMs: envMs("CLAUDE_BRIDGE_CHECKPOINT_TIMEOUT_MS", 300_000),
+  nextCheckpointTimeoutMs: envMs("CLAUDE_BRIDGE_CHECKPOINT_TIMEOUT_MS", DEFAULT_TURN_BUDGET_MS),
 };
 
 // ─── PersistentSession ──────────────────────────────────────────────────────

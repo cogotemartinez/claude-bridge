@@ -13,7 +13,7 @@ import {
   CLI_ERROR_AS_CONTENT_PREFIX,
 } from "./error-as-content.js";
 import type { BridgeMcpHttpServer, McpTool } from "./mcp-http.js";
-import { mcpPendingTimeoutMs } from "./mcp-http.js";
+import { DEFAULT_TURN_BUDGET_MS, mcpPendingTimeoutMs } from "./mcp-http.js";
 import type { PersistentSessionPool } from "./session-pool.js";
 import type { ContentBlock } from "./translate.js";
 import {
@@ -119,7 +119,7 @@ export interface WorkerPoolConfig {
 }
 
 let poolConfig: WorkerPoolConfig = {
-  timeoutMs: 300_000,
+  timeoutMs: DEFAULT_TURN_BUDGET_MS,
   maxConcurrent: 8,
   maxSessions: 200,
 };
