@@ -526,6 +526,23 @@ export class PersistentSessionPool {
     this.evictTimer.unref();
   }
 
+  /** How many persistent CLI children are alive right now, and how many
+   *  session slots the pool holds (a dead session lingers until acquire or
+   *  evictIdle clears it).
+   *
+   *  The `activeProcesses` metric used to come from cli-worker's own set,
+   *  which only the LEGACY spawn path fills. Path D has been the default
+   *  since v3.5.0, so that number was structurally stuck at 0 and read as
+   *  "the CLI died" while a child was sitting there working — it cost real
+   *  debugging time twice on 2026-09-19. */
+  liveStats(): { processes: number; slots: number } {
+    let processes = 0;
+    for (const session of this.sessions.values()) {
+      if (!session.dead) processes++;
+    }
+    return { processes, slots: this.sessions.size };
+  }
+
   /** Get an existing session for this key if compatible, else respawn.
    *  Returns `{ session, isFresh }` — callers use `isFresh` to decide
    *  whether a system-prompt injection is needed on the first turn. */

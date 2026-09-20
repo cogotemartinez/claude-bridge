@@ -1088,8 +1088,10 @@ export function getMetrics(): BridgeMetrics {
         : Math.round(metrics.latencyMsSum / metrics.latencyMsCount),
     inFlight,
     waiting: waiters.length,
-    activeProcesses: activeProcs.size,
-    sessions: sessions.size,
+    // Legacy-path children plus Path D's persistent ones. Reporting only the
+    // former made this read 0 while a CLI was alive and working.
+    activeProcesses: activeProcs.size + (pathDConfig?.sessionPool.liveStats().processes ?? 0),
+    sessions: sessions.size + (pathDConfig?.sessionPool.liveStats().slots ?? 0),
     sessionTails: sessionTail.size,
     // The latest quota reading: the upstream rate_limit_event, or "rejected"
     // from a quota-exhausted 429. `null` until either has happened (i.e.
