@@ -13,6 +13,7 @@ import {
   CLI_ERROR_AS_CONTENT_PREFIX,
 } from "./error-as-content.js";
 import type { BridgeMcpHttpServer, McpTool } from "./mcp-http.js";
+import { mcpPendingTimeoutMs } from "./mcp-http.js";
 import type { PersistentSessionPool } from "./session-pool.js";
 import type { ContentBlock } from "./translate.js";
 import {
@@ -412,7 +413,10 @@ export async function enqueuePersistent(
         await mcpServer.waitForPending(
           request.sessionKey,
           cp.toolUse.toolUseId,
-          undefined,
+          // Same budget the checkpoint read above gets: a continuation in a
+          // large session can take minutes to reach its own tool call, and a
+          // shorter gate here just fails the turn before its deadline.
+          mcpPendingTimeoutMs(process.env, poolConfig.timeoutMs),
           cp.toolUse.name,
         );
       }

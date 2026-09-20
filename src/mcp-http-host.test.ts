@@ -69,11 +69,23 @@ test("waitForPending resolves on the tools/call event (real loopback server)", a
   await server.stop();
 });
 
-test("the MCP pending gate waits a minute by default, and takes an override from the env", () => {
-  // Was a hard 10s and killed a slow CLI turn on 2026-09-19.
-  assert.equal(mcpPendingTimeoutMs({}), 60_000);
-  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "5000" }), 5_000);
-  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "no" }), 60_000);
+test("the MCP pending gate waits the turn's own budget, and takes an override from the env", () => {
+  // Was a hard 10s, then briefly a hard 60s earlier the same day. Both were
+  // invented numbers: measured on 2026-09-19, a continuation in a 304k-token
+  // session took 3m55s and 7m55s to reach its tool call, on two models. The
+  // gate cannot separate slow from stuck, so it waits as long as the turn may.
+  assert.equal(mcpPendingTimeoutMs({}, 300_000), 300_000);
+  assert.equal(mcpPendingTimeoutMs({}, 42_000), 42_000);
+  // No budget passed: the pool's own default, not something shorter.
+  assert.equal(mcpPendingTimeoutMs({}), 300_000);
+  // An explicit override still wins over the budget, in both directions.
+  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "5000" }, 300_000), 5_000);
+  assert.equal(
+    mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "900000" }, 300_000),
+    900_000,
+  );
+  // Garbage falls back to the budget rather than to zero.
+  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "no" }, 300_000), 300_000);
 });
 
 test("waitForPending names the tool in its timeout, so the log says what the CLI asked for", async () => {

@@ -100,19 +100,29 @@ export function isLoopbackHost(host: string | undefined): boolean {
 
 /**
  * How long a tool_use announced on the CLI's stream may take to show up as an
- * MCP POST before the turn is failed.
+ * MCP POST before the turn is failed. Defaults to the turn's own budget, which
+ * callers pass in as `turnBudgetMs`.
  *
- * Was a hard 10s. On 2026-09-19 a webchat turn with a 304k-token prompt died on
- * that gate: the CLI announced a tool_use and its own next MCP calls in that
- * session landed 5 and 10 minutes later, so the CLI was simply slow, not stuck.
- * Ten seconds only ever covered the intended race (stream event arriving a few
- * ms before the POST). A minute still fails fast against the real stuck case —
- * a tool_use the CLI never calls, such as a name outside --allowedTools — while
- * the caller's own 600s budget stays the outer bound.
+ * This was a hard 10s, on the theory that the gate only ever covers a race of a
+ * few milliseconds between the stream-json event and the POST. Measured on
+ * 2026-09-19 against a 304k-token webchat session, that theory is wrong for
+ * CONTINUATIONS: the first tool call of a freshly primed session did land in
+ * ~11s, but every continuation re-digests the whole conversation first, and its
+ * POSTs arrived 3m55s and 7m55s after the announcement — on two different
+ * models, so this is the session size, not one model being slow.
+ *
+ * So the gate cannot tell "slow" from "stuck" by any short constant, and a
+ * separate shorter deadline buys nothing: the turn already has one. Waiting the
+ * turn's budget makes a tool the CLI never calls (a name outside
+ * --allowedTools) fail at the same deadline as everything else, instead of at
+ * an invented number that killed real work.
  */
-export function mcpPendingTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+export function mcpPendingTimeoutMs(
+  env: NodeJS.ProcessEnv = process.env,
+  turnBudgetMs = 300_000,
+): number {
   const raw = Number(env.CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
+  return Number.isFinite(raw) && raw > 0 ? raw : turnBudgetMs;
 }
 
 export class BridgeMcpHttpServer {
