@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { BridgeMcpHttpServer, isLoopbackHost } from "./mcp-http.ts";
+import { BridgeMcpHttpServer, isLoopbackHost, mcpPendingTimeoutMs } from "./mcp-http.ts";
 
 test("isLoopbackHost: accepts loopback hosts (with and without port)", () => {
   for (const h of [
@@ -66,6 +66,27 @@ test("waitForPending resolves on the tools/call event (real loopback server)", a
   // Deliver a result so the parked POST closes cleanly, then shut down.
   assert.equal(server.tryResolveToolCall(key, toolUseId, [{ type: "text", text: "ok" }]), true);
   await post;
+  await server.stop();
+});
+
+test("the MCP pending gate waits a minute by default, and takes an override from the env", () => {
+  // Was a hard 10s and killed a slow CLI turn on 2026-09-19.
+  assert.equal(mcpPendingTimeoutMs({}), 60_000);
+  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "5000" }), 5_000);
+  assert.equal(mcpPendingTimeoutMs({ CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS: "no" }), 60_000);
+});
+
+test("waitForPending names the tool in its timeout, so the log says what the CLI asked for", async () => {
+  // The 2026-09-19 webchat failure only said the tool_use id, which appears in
+  // no other log line: nothing said which tool the CLI announced.
+  const server = new BridgeMcpHttpServer();
+  await server.start(0);
+  const key = "agent:test:namedtimeout";
+  server.registerSession(key, []);
+  await assert.rejects(
+    () => server.waitForPending(key, "toolu_missing", 100, "mcp__openclaw__read"),
+    /waitForPending timeout: mcp__openclaw__read toolu_missing did not arrive within 100ms/,
+  );
   await server.stop();
 });
 

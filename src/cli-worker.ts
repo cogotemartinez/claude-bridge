@@ -409,7 +409,12 @@ export async function enqueuePersistent(
       // fast caller round-trips with a tool_result before pending exists
       // and resolveToolCall throws "no pending tool call".
       if (cp.toolUse) {
-        await mcpServer.waitForPending(request.sessionKey, cp.toolUse.toolUseId);
+        await mcpServer.waitForPending(
+          request.sessionKey,
+          cp.toolUse.toolUseId,
+          undefined,
+          cp.toolUse.name,
+        );
       }
 
       const toolCalls: CLIToolCall[] = cp.toolUse

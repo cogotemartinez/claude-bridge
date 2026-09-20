@@ -98,6 +98,23 @@ export function isLoopbackHost(host: string | undefined): boolean {
   );
 }
 
+/**
+ * How long a tool_use announced on the CLI's stream may take to show up as an
+ * MCP POST before the turn is failed.
+ *
+ * Was a hard 10s. On 2026-09-19 a webchat turn with a 304k-token prompt died on
+ * that gate: the CLI announced a tool_use and its own next MCP calls in that
+ * session landed 5 and 10 minutes later, so the CLI was simply slow, not stuck.
+ * Ten seconds only ever covered the intended race (stream event arriving a few
+ * ms before the POST). A minute still fails fast against the real stuck case —
+ * a tool_use the CLI never calls, such as a name outside --allowedTools — while
+ * the caller's own 600s budget stays the outer bound.
+ */
+export function mcpPendingTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.CLAUDE_BRIDGE_MCP_PENDING_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 60_000;
+}
+
 export class BridgeMcpHttpServer {
   private server: Server | null = null;
   private actualPort = 0;
@@ -166,7 +183,12 @@ export class BridgeMcpHttpServer {
    *  so the bridge needs to wait for this gate before returning the
    *  tool_use to the OAI caller — otherwise a fast caller round-trips with
    *  a tool_result before pending exists and tryResolveToolCall misses. */
-  async waitForPending(sessionKey: string, toolUseId: string, timeoutMs = 10_000): Promise<void> {
+  async waitForPending(
+    sessionKey: string,
+    toolUseId: string,
+    timeoutMs = mcpPendingTimeoutMs(),
+    toolName?: string,
+  ): Promise<void> {
     const ctx = this.sessions.get(sessionKey);
     if (!ctx) throw new Error(`session not registered: ${sessionKey}`);
     if (this.findPending(ctx, toolUseId)) return;
@@ -203,7 +225,7 @@ export class BridgeMcpHttpServer {
         else if (Date.now() >= deadline) {
           finish(
             new Error(
-              `waitForPending timeout: ${toolUseId} did not arrive within ${timeoutMs}ms`,
+              `waitForPending timeout: ${toolName ? `${toolName} ` : ""}${toolUseId} did not arrive within ${timeoutMs}ms`,
             ),
           );
         }
